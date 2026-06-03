@@ -23,14 +23,17 @@ app.whenReady().then(() => {
     height: 720,
     show: false,
     webPreferences: {
-      offscreen: { useSharedTexture: true },
+      // deviceScaleFactor:1 publishes at the exact size (no Retina 2× overdraw)
+      offscreen: { useSharedTexture: true, deviceScaleFactor: 1 },
       backgroundThrottling: false
     }
   })
   publisher.webContents.setFrameRate(60)
 
   const syphon = new SyphonOutput(NAME)
-  syphon.attach(publisher.webContents)
+  // Render + publish at exactly 1280×720 — this is the size Syphon receives, since
+  // we send what Electron renders. setResolution(w, h) changes it later if needed.
+  syphon.attach(publisher.webContents, { width: 1280, height: 720 })
   publisher.loadFile(file)
 
   // Spacebar fully suspends/resumes the OFFSCREEN render. pause() drops the

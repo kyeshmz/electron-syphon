@@ -8,9 +8,9 @@ DEFS_Debug := \
 	'-DUSING_V8_SHARED=1' \
 	'-DV8_DEPRECATION_WARNINGS=1' \
 	'-D_GLIBCXX_USE_CXX11_ABI=1' \
+	'-D_FILE_OFFSET_BITS=64' \
 	'-D_DARWIN_USE_64_BIT_INODE=1' \
 	'-D_LARGEFILE_SOURCE' \
-	'-D_FILE_OFFSET_BITS=64' \
 	'-DOPENSSL_NO_PINSHARED' \
 	'-DOPENSSL_THREADS' \
 	'-DNAPI_CPP_EXCEPTIONS' \
@@ -49,14 +49,14 @@ CFLAGS_OBJCC_Debug := \
 	-fobjc-arc
 
 INCS_Debug := \
-	-I/tmp/claude-501/prebuildify/node/24.0.0/include/node \
-	-I/tmp/claude-501/prebuildify/node/24.0.0/src \
-	-I/tmp/claude-501/prebuildify/node/24.0.0/deps/openssl/config \
-	-I/tmp/claude-501/prebuildify/node/24.0.0/deps/openssl/openssl/include \
-	-I/tmp/claude-501/prebuildify/node/24.0.0/deps/uv/include \
-	-I/tmp/claude-501/prebuildify/node/24.0.0/deps/zlib \
-	-I/tmp/claude-501/prebuildify/node/24.0.0/deps/v8/include \
-	-I/Users/kyeshmz/Documents/personal/electron-spout/node_modules/node-addon-api
+	-I/Users/kyeshmz/Library/Caches/node-gyp/22.21.0/include/node \
+	-I/Users/kyeshmz/Library/Caches/node-gyp/22.21.0/src \
+	-I/Users/kyeshmz/Library/Caches/node-gyp/22.21.0/deps/openssl/config \
+	-I/Users/kyeshmz/Library/Caches/node-gyp/22.21.0/deps/openssl/openssl/include \
+	-I/Users/kyeshmz/Library/Caches/node-gyp/22.21.0/deps/uv/include \
+	-I/Users/kyeshmz/Library/Caches/node-gyp/22.21.0/deps/zlib \
+	-I/Users/kyeshmz/Library/Caches/node-gyp/22.21.0/deps/v8/include \
+	-I/Users/kyeshmz/Documents/personal/electron-spout/node_modules/.pnpm/node-addon-api@8.8.0/node_modules/node-addon-api
 
 DEFS_Release := \
 	'-DNODE_GYP_MODULE_NAME=syphon_addon' \
@@ -64,9 +64,9 @@ DEFS_Release := \
 	'-DUSING_V8_SHARED=1' \
 	'-DV8_DEPRECATION_WARNINGS=1' \
 	'-D_GLIBCXX_USE_CXX11_ABI=1' \
+	'-D_FILE_OFFSET_BITS=64' \
 	'-D_DARWIN_USE_64_BIT_INODE=1' \
 	'-D_LARGEFILE_SOURCE' \
-	'-D_FILE_OFFSET_BITS=64' \
 	'-DOPENSSL_NO_PINSHARED' \
 	'-DOPENSSL_THREADS' \
 	'-DNAPI_CPP_EXCEPTIONS' \
@@ -103,14 +103,14 @@ CFLAGS_OBJCC_Release := \
 	-fobjc-arc
 
 INCS_Release := \
-	-I/tmp/claude-501/prebuildify/node/24.0.0/include/node \
-	-I/tmp/claude-501/prebuildify/node/24.0.0/src \
-	-I/tmp/claude-501/prebuildify/node/24.0.0/deps/openssl/config \
-	-I/tmp/claude-501/prebuildify/node/24.0.0/deps/openssl/openssl/include \
-	-I/tmp/claude-501/prebuildify/node/24.0.0/deps/uv/include \
-	-I/tmp/claude-501/prebuildify/node/24.0.0/deps/zlib \
-	-I/tmp/claude-501/prebuildify/node/24.0.0/deps/v8/include \
-	-I/Users/kyeshmz/Documents/personal/electron-spout/node_modules/node-addon-api
+	-I/Users/kyeshmz/Library/Caches/node-gyp/22.21.0/include/node \
+	-I/Users/kyeshmz/Library/Caches/node-gyp/22.21.0/src \
+	-I/Users/kyeshmz/Library/Caches/node-gyp/22.21.0/deps/openssl/config \
+	-I/Users/kyeshmz/Library/Caches/node-gyp/22.21.0/deps/openssl/openssl/include \
+	-I/Users/kyeshmz/Library/Caches/node-gyp/22.21.0/deps/uv/include \
+	-I/Users/kyeshmz/Library/Caches/node-gyp/22.21.0/deps/zlib \
+	-I/Users/kyeshmz/Library/Caches/node-gyp/22.21.0/deps/v8/include \
+	-I/Users/kyeshmz/Documents/personal/electron-spout/node_modules/.pnpm/node-addon-api@8.8.0/node_modules/node-addon-api
 
 OBJS := \
 	$(obj).target/$(TARGET)/native/syphon/syphon_addon.o

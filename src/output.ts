@@ -47,14 +47,26 @@ export class SyphonOutput {
   // Frame rate to restore on resume(); -1 means "not currently paused".
   private savedFrameRate = -1
 
+  // Desired render/publish resolution from setResolution(); 0 = the window's
+  // natural size. Because we publish exactly what Electron renders, this is also
+  // the size Syphon receives — no scaling, no readback.
+  private reqWidth = 0
+  private reqHeight = 0
+  private warnedScale = false
+
   constructor(name: string) {
     this.server = new SyphonServer(name)
   }
 
-  attach(wc: WebContents): void {
+  attach(wc: WebContents, opts?: { width?: number; height?: number }): void {
     this.detach()
     this.wc = wc
     wc.on('paint', this.handlePaint)
+    if (opts?.width && opts?.height) {
+      this.reqWidth = Math.max(0, Math.floor(opts.width))
+      this.reqHeight = Math.max(0, Math.floor(opts.height))
+    }
+    this.applyResolution()
   }
 
   detach(): void {
@@ -104,6 +116,59 @@ export class SyphonOutput {
     }
     this.savedFrameRate = -1
     this.enabled = true
+  }
+
+  /**
+   * Set the resolution to publish — by setting the resolution Electron *renders*.
+   *
+   * This pipeline sends exactly what the offscreen window renders (no scaling, no
+   * readback), so the publish resolution is the render resolution. Rendering fewer
+   * pixels is the single biggest performance lever: it shrinks Syphon's per-frame
+   * blit, GPU/VRAM bandwidth, and shared-texture-pool pressure all at once. Render
+   * at the size your Syphon consumer actually needs, not the display's.
+   *
+   * Implementation: resizes the `BrowserWindow` that owns the attached
+   * `webContents` (via `setContentSize`). For the published frame to be exactly
+   * `width × height`, that window must have been created with
+   * `webPreferences.offscreen.deviceScaleFactor: 1` (Electron 42+); otherwise the
+   * realized output is `width*dsf × height*dsf` — `outWidth`/`outHeight` report the
+   * truth and a one-time warning fires on the first mismatched frame.
+   *
+   * Pass `0, 0` to stop managing the size. No-op (with a warning) if the
+   * `webContents` isn't owned by a `BrowserWindow` — in that case size the window
+   * yourself; the published size still equals the rendered size.
+   */
+  setResolution(width: number, height: number): void {
+    this.reqWidth = Math.max(0, Math.floor(width))
+    this.reqHeight = Math.max(0, Math.floor(height))
+    this.warnedScale = false
+    this.applyResolution()
+  }
+
+  /** The requested render/publish resolution, or null when unmanaged (the window
+   *  renders at its natural size). `outWidth`/`outHeight` report what is actually
+   *  being published once frames flow. */
+  get resolution(): { width: number; height: number } | null {
+    return this.reqWidth > 0 && this.reqHeight > 0
+      ? { width: this.reqWidth, height: this.reqHeight }
+      : null
+  }
+
+  private applyResolution(): void {
+    const wc = this.wc
+    if (!wc || wc.isDestroyed() || this.reqWidth <= 0 || this.reqHeight <= 0) return
+    // Lazy require so 'electron' stays an optional peer dep at module load.
+    const { BrowserWindow } = require('electron') as typeof import('electron')
+    const win = BrowserWindow.fromWebContents(wc)
+    if (!win || win.isDestroyed()) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        '[electron-syphon] setResolution: this webContents is not owned by a BrowserWindow; ' +
+          'size the window/view yourself (published size == rendered size).'
+      )
+      return
+    }
+    win.setContentSize(this.reqWidth, this.reqHeight)
   }
 
   /** Manually publish a CPU pixel buffer (for non-offscreen capture methods,
@@ -156,8 +221,7 @@ export class SyphonOutput {
           // across Electron versions (Buffer on <=41, mistyped void on 42), so cast.
           const bitmap = image.getBitmap() as unknown as Buffer
           this.server.publishImageBuffer(bitmap, width, height, 'bgra', this.flipY)
-          this.outWidth = width
-          this.outHeight = height
+          this.noteRealized(width, height)
           this.note(performance.now() - t0)
         }
       }
@@ -183,8 +247,7 @@ export class SyphonOutput {
 
     const w = info.codedSize.width
     const h = info.codedSize.height
-    this.outWidth = w
-    this.outHeight = h
+    this.noteRealized(w, h)
     const t0 = performance.now()
 
     if (this.async) {
@@ -203,6 +266,28 @@ export class SyphonOutput {
     }
 
     this.note(performance.now() - t0)
+  }
+
+  /** Record the actually-published size and, once, warn if it doesn't match the
+   *  resolution requested via setResolution() (the deviceScaleFactor != 1 trap). */
+  private noteRealized(w: number, h: number): void {
+    this.outWidth = w
+    this.outHeight = h
+    if (this.reqWidth > 0 && !this.warnedScale && (w !== this.reqWidth || h !== this.reqHeight)) {
+      // Only flag the deviceScaleFactor trap: a uniform upscale of the requested
+      // size on both axes (a transient size mid-resize won't match this).
+      const sx = w / this.reqWidth
+      const sy = h / this.reqHeight
+      if (sx > 1 && Math.abs(sx - sy) < 0.001) {
+        this.warnedScale = true
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[electron-syphon] requested ${this.reqWidth}×${this.reqHeight} but publishing ${w}×${h} ` +
+            `(~${sx.toFixed(2)}× — a Retina/deviceScaleFactor scale-up); create the window with ` +
+            'offscreen.deviceScaleFactor: 1 (Electron 42+) to render at the exact size.'
+        )
+      }
+    }
   }
 
   private note(dt: number): void {

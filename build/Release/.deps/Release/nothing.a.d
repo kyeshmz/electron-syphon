@@ -1,1 +1,1 @@
-cmd_Release/nothing.a := rm -f Release/nothing.a && /Users/kyeshmz/.local/share/mise/installs/python/3.11.11/bin/python3 gyp-mac-tool filter-libtool libtool  -static -o Release/nothing.a Release/obj.target/nothing/node_modules/node-addon-api/nothing.o
+cmd_Release/nothing.a := rm -f Release/nothing.a && /Users/kyeshmz/.local/share/mise/installs/python/3.11.11/bin/python3 gyp-mac-tool filter-libtool libtool  -static -o Release/nothing.a Release/obj.target/nothing/node_modules/.pnpm/node-addon-api@8.8.0/node_modules/node-addon-api/nothing.o
