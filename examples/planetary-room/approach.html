@@ -1,0 +1,189 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>planetary-room · approach</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #02060a; overflow: hidden; }
+      canvas { display: block; width: 100vw; height: 100vh; }
+    </style>
+  </head>
+  <body>
+    <canvas id="c" width="1280" height="720"></canvas>
+    <script>
+      // City "approach radar" — PLAIN Canvas2D, no CDN, fully offline.
+      // Concentric range rings + a sweeping beam + synthetic inbound aircraft
+      // easing toward the field. The rings/beam render immediately, so the
+      // source is non-black from the first frame regardless of any data feed.
+      //
+      // Aircraft are synthetic on purpose (no OpenSky rate limits). To swap in
+      // real traffic, replace makePlane()/the update loop with an OpenSky
+      // /api/states/all fetch keyed to a bbox — the draw code is unchanged.
+      const canvas = document.getElementById('c')
+      const ctx = canvas.getContext('2d', { alpha: false })
+      const W = 1280, H = 720
+      const CX = 470, CY = 360         // radar center
+      const R = 320                    // outer ring radius (nm-scaled)
+
+      const CALLS = ['SWA','UAL','DAL','AAL','JBU','BAW','AFR','DLH','ANA','QFA','KAL','EVA','SIA']
+      const rnd = (a, b) => a + Math.random() * (b - a)
+
+      function makePlane() {
+        const bearing = rnd(0, Math.PI * 2)
+        const dist = rnd(0.78, 1.04)               // start near / beyond outer ring
+        return {
+          call: CALLS[(Math.random() * CALLS.length) | 0] + (100 + (Math.random() * 899 | 0)),
+          ang: bearing,                            // angle from field
+          dist,                                    // 0..1 of R
+          speed: rnd(0.020, 0.038),                // closing rate per second
+          drift: rnd(-0.12, 0.12),                // slight curve to the track
+          alt: Math.round(rnd(80, 240)) * 100,     // ft
+          gs: Math.round(rnd(180, 320)),           // kt
+          trail: []
+        }
+      }
+      let planes = Array.from({ length: 7 }, makePlane)
+
+      let sweep = 0, lastT = 0
+
+      function ring(r, label) {
+        ctx.beginPath()
+        ctx.arc(CX, CY, r, 0, Math.PI * 2)
+        ctx.strokeStyle = 'rgba(80,220,150,0.22)'
+        ctx.lineWidth = 1
+        ctx.stroke()
+        if (label) {
+          ctx.fillStyle = 'rgba(120,230,180,0.45)'
+          ctx.font = '600 11px ui-monospace, Menlo, monospace'
+          ctx.textAlign = 'left'
+          ctx.fillText(label, CX + 4, CY - r + 12)
+        }
+      }
+
+      function frame(t) {
+        const dt = lastT ? Math.min(0.05, (t - lastT) / 1000) : 0.016
+        lastT = t
+        sweep += dt * 1.1
+
+        ctx.fillStyle = '#02060a'
+        ctx.fillRect(0, 0, W, H)
+
+        // Scope backdrop.
+        ctx.fillStyle = '#03110b'
+        ctx.beginPath(); ctx.arc(CX, CY, R + 18, 0, Math.PI * 2); ctx.fill()
+
+        // Range rings + radials.
+        for (let i = 1; i <= 4; i++) ring((R / 4) * i, (i * 10) + ' nm')
+        ctx.strokeStyle = 'rgba(80,220,150,0.14)'
+        for (let a = 0; a < 360; a += 30) {
+          const rad = a * Math.PI / 180
+          ctx.beginPath()
+          ctx.moveTo(CX, CY)
+          ctx.lineTo(CX + Math.cos(rad) * R, CY + Math.sin(rad) * R)
+          ctx.stroke()
+        }
+        // Cardinal labels.
+        ctx.fillStyle = 'rgba(150,240,200,0.6)'
+        ctx.font = '700 13px ui-monospace, Menlo, monospace'
+        ctx.textAlign = 'center'
+        ctx.fillText('N', CX, CY - R - 6)
+        ctx.fillText('S', CX, CY + R + 16)
+        ctx.fillText('E', CX + R + 12, CY + 5)
+        ctx.fillText('W', CX - R - 12, CY + 5)
+
+        // Sweep beam (rotating gradient wedge).
+        const sa = sweep % (Math.PI * 2)
+        const g = ctx.createRadialGradient(CX, CY, 0, CX, CY, R)
+        g.addColorStop(0, 'rgba(90,255,170,0.10)')
+        g.addColorStop(1, 'rgba(90,255,170,0)')
+        ctx.save()
+        ctx.beginPath()
+        ctx.moveTo(CX, CY)
+        ctx.arc(CX, CY, R, sa - 0.32, sa)
+        ctx.closePath()
+        ctx.fillStyle = g
+        ctx.fill()
+        ctx.strokeStyle = 'rgba(120,255,190,0.5)'
+        ctx.lineWidth = 1.4
+        ctx.beginPath()
+        ctx.moveTo(CX, CY)
+        ctx.lineTo(CX + Math.cos(sa) * R, CY + Math.sin(sa) * R)
+        ctx.stroke()
+        ctx.restore()
+
+        // Field marker.
+        ctx.fillStyle = '#baffe0'
+        ctx.beginPath(); ctx.arc(CX, CY, 4, 0, Math.PI * 2); ctx.fill()
+
+        // Update + draw aircraft.
+        for (const p of planes) {
+          p.dist -= p.speed * dt
+          p.ang += p.drift * dt
+          if (p.dist <= 0.02) { Object.assign(p, makePlane()); continue }
+          const px = CX + Math.cos(p.ang) * p.dist * R
+          const py = CY + Math.sin(p.ang) * p.dist * R
+          p.trail.push([px, py])
+          if (p.trail.length > 22) p.trail.shift()
+
+          // Trail.
+          ctx.strokeStyle = 'rgba(120,255,190,0.28)'
+          ctx.lineWidth = 1
+          ctx.beginPath()
+          p.trail.forEach((q, i) => i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1]))
+          ctx.stroke()
+
+          // Blip — brighter when the sweep has just passed it.
+          const rel = ((p.ang - sa) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2)
+          const fresh = Math.max(0, 1 - rel / 0.9)
+          ctx.fillStyle = `rgba(150,255,200,${0.45 + 0.55 * fresh})`
+          ctx.beginPath(); ctx.arc(px, py, 3.2, 0, Math.PI * 2); ctx.fill()
+
+          // Data block (monospace).
+          ctx.fillStyle = 'rgba(190,255,225,0.92)'
+          ctx.font = '600 11px ui-monospace, Menlo, monospace'
+          ctx.textAlign = 'left'
+          ctx.fillText(p.call, px + 8, py - 4)
+          ctx.fillStyle = 'rgba(140,210,185,0.8)'
+          ctx.fillText('FL' + (p.alt / 100 | 0) + '  ' + p.gs + 'kt', px + 8, py + 9)
+        }
+
+        // Title + strip panel on the right.
+        ctx.textAlign = 'left'
+        ctx.fillStyle = '#cfeede'
+        ctx.font = '700 24px ui-monospace, Menlo, monospace'
+        ctx.fillText('APPROACH · TRACON', 28, 44)
+        ctx.fillStyle = '#6fbf97'
+        ctx.font = '500 13px ui-monospace, Menlo, monospace'
+        ctx.fillText('synthetic traffic · 40 nm scope', 28, 66)
+
+        const SX = 858
+        ctx.strokeStyle = 'rgba(80,220,150,0.25)'
+        ctx.strokeRect(SX - 0.5, 80.5, 394, 580)
+        ctx.fillStyle = '#9fe0c0'
+        ctx.font = '700 14px ui-monospace, Menlo, monospace'
+        ctx.fillText('INBOUND STRIPS', SX + 14, 104)
+        ctx.font = '500 12px ui-monospace, Menlo, monospace'
+        let yy = 132
+        const sorted = [...planes].sort((a, b) => a.dist - b.dist)
+        for (const p of sorted) {
+          const nm = Math.round(p.dist * 40)
+          ctx.fillStyle = 'rgba(150,255,200,0.95)'
+          ctx.fillText(p.call.padEnd(7, ' '), SX + 14, yy)
+          ctx.fillStyle = '#7fc7a4'
+          ctx.fillText('FL' + String(p.alt / 100 | 0).padStart(3, '0') + '   ' + String(p.gs).padStart(3) + 'kt   ' + String(nm).padStart(2) + 'nm', SX + 90, yy)
+          yy += 26
+        }
+
+        ctx.fillStyle = '#2f5a45'
+        ctx.font = '600 12px ui-monospace, Menlo, monospace'
+        ctx.fillText('SYPHON · planetary-room · approach', 28, H - 14)
+
+        requestAnimationFrame(frame)
+      }
+      requestAnimationFrame(frame)
+
+      // Occasionally hand off a new arrival so the scope stays busy.
+      setInterval(() => { if (planes.length < 9 && Math.random() < 0.5) planes.push(makePlane()) }, 4000)
+    </script>
+  </body>
+</html>

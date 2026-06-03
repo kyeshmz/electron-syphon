@@ -1,0 +1,142 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>signal-delay — sender (simulated performers)</title>
+    <style>
+      html, body { margin: 0; background: #000; }
+    </style>
+  </head>
+  <body>
+    <script>
+      // The SENDER. It stands in for N remote performers so the example needs no
+      // real camera/phone/network. For each portal k it:
+      //   1. animates a Canvas2D scene and turns it into a live MediaStream via
+      //      canvas.captureStream(30) — a moving shape, a running clock, a big
+      //      "PERFORMER #k" label;
+      //   2. opens an RTCPeerConnection to portal #k and addTrack()s that stream;
+      //   3. exchanges SDP + ICE with the portal over the main-process relay.
+      // No STUN/TURN — loopback uses host candidates (localhost). iceServers: [].
+      const { ipcRenderer } = require('electron')
+      const params = new URLSearchParams(location.search)
+      const N = Number(params.get('n') || 3)
+
+      // The portals' offscreen size; render the stream at the same aspect.
+      const W = 1280, H = 720
+
+      // A distinct palette + "city" per performer, just for visual variety.
+      const PEERS = [
+        { city: 'TOKYO',    hue: 188 },
+        { city: 'BERLIN',   hue: 16  },
+        { city: 'SÃO PAULO', hue: 286 },
+        { city: 'LAGOS',    hue: 128 },
+        { city: 'MONTRÉAL', hue: 52  },
+        { city: 'SEOUL',    hue: 330 }
+      ]
+
+      // Build one animated canvas stream for performer k (1-indexed).
+      function makePerformerStream(k) {
+        const meta = PEERS[(k - 1) % PEERS.length]
+        const canvas = document.createElement('canvas')
+        canvas.width = W
+        canvas.height = H
+        const ctx = canvas.getContext('2d', { alpha: false })
+        const t0 = performance.now()
+
+        function frame(now) {
+          const t = (now - t0) / 1000
+
+          // Background: a slow two-tone gradient unique to this performer.
+          const g = ctx.createLinearGradient(0, 0, W, H)
+          g.addColorStop(0, `hsl(${meta.hue}, 60%, 10%)`)
+          g.addColorStop(1, `hsl(${(meta.hue + 40) % 360}, 55%, 22%)`)
+          ctx.fillStyle = g
+          ctx.fillRect(0, 0, W, H)
+
+          // A bright moving shape so the frame is unmistakably non-black and the
+          // motion proves it's a LIVE stream, not a still.
+          const cx = W / 2 + Math.cos(t * 1.1) * (W * 0.28)
+          const cy = H / 2 + Math.sin(t * 1.4) * (H * 0.28)
+          const r = H * 0.16 + Math.sin(t * 2) * H * 0.03
+          ctx.fillStyle = `hsl(${(meta.hue + 180) % 360}, 95%, 60%)`
+          ctx.beginPath()
+          ctx.arc(cx, cy, r, 0, Math.PI * 2)
+          ctx.fill()
+
+          // Orbiting marks for a touch of life.
+          ctx.fillStyle = '#fff';
+          for (let i = 0; i < 6; i++) {
+            const a = t * 0.8 + (i / 6) * Math.PI * 2
+            ctx.beginPath()
+            ctx.arc(cx + Math.cos(a) * r * 1.7, cy + Math.sin(a) * r * 1.7, 10, 0, Math.PI * 2)
+            ctx.fill()
+          }
+
+          // Big label + a running clock so a viewer sees it ticking.
+          ctx.fillStyle = '#fff'
+          ctx.textAlign = 'center'
+          ctx.font = `800 ${Math.round(W / 14)}px system-ui, sans-serif`
+          ctx.fillText(`PERFORMER #${k}`, W / 2, H * 0.46)
+          ctx.font = `600 ${Math.round(W / 30)}px system-ui, sans-serif`
+          ctx.fillText(meta.city, W / 2, H * 0.58)
+          ctx.font = `700 ${Math.round(W / 22)}px ui-monospace, Menlo, monospace`
+          ctx.fillText(t.toFixed(2) + 's', W / 2, H * 0.70)
+
+          requestAnimationFrame(frame)
+        }
+        requestAnimationFrame(frame)
+
+        return canvas.captureStream(30)
+      }
+
+      // One peer connection per performer → portal #k.
+      function connectTo(k) {
+        const stream = makePerformerStream(k)
+        const pc = new RTCPeerConnection({ iceServers: [] })
+        for (const track of stream.getTracks()) pc.addTrack(track, stream)
+
+        pc.onicecandidate = (e) => {
+          if (e.candidate) {
+            ipcRenderer.send('signal', {
+              to: String(k), from: 'sender', kind: 'ice', data: e.candidate.toJSON()
+            })
+          }
+        }
+        pc.onconnectionstatechange = () => {
+          ipcRenderer.send('senderState', { id: k, state: pc.connectionState })
+        }
+
+        // The sender is the OFFERER. Create + send the offer.
+        pc.createOffer()
+          .then((offer) => pc.setLocalDescription(offer).then(() => offer))
+          .then((offer) => {
+            ipcRenderer.send('signal', {
+              to: String(k), from: 'sender', kind: 'offer', data: { type: offer.type, sdp: offer.sdp }
+            })
+          })
+          .catch((err) => ipcRenderer.send('senderState', { id: k, state: 'offer-error: ' + err }))
+
+        return pc
+      }
+
+      // Hold each pc by portal id so relayed messages can find it.
+      const peers = {}
+
+      ipcRenderer.on('signal', (_e, msg) => {
+        // msg.from is the portal id (a number-as-string); route to that pc.
+        const pc = peers[msg.from]
+        if (!pc) return
+        if (msg.kind === 'answer') {
+          pc.setRemoteDescription(msg.data).catch((err) =>
+            ipcRenderer.send('senderState', { id: Number(msg.from), state: 'answer-error: ' + err })
+          )
+        } else if (msg.kind === 'ice') {
+          pc.addIceCandidate(msg.data).catch(() => { /* late/duplicate candidate */ })
+        }
+      })
+
+      // Kick everything off.
+      for (let k = 1; k <= N; k++) peers[String(k)] = connectTo(k)
+    </script>
+  </body>
+</html>

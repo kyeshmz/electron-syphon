@@ -1,0 +1,62 @@
+{
+  "name": "electron-syphon",
+  "version": "0.1.0",
+  "description": "Publish an Electron app's GPU frames to Syphon on macOS — zero-copy, from the main process.",
+  "license": "MIT",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "gypfile": true,
+  "os": ["darwin"],
+  "engines": { "node": ">=18" },
+  "files": [
+    "dist",
+    "prebuilds",
+    "Frameworks",
+    "native",
+    "binding.gyp",
+    "README.md"
+  ],
+  "scripts": {
+    "install": "node-gyp-build",
+    "build:native": "node-gyp rebuild",
+    "build:ts": "tsc -p tsconfig.json",
+    "build": "npm run build:ts && npm run build:native",
+    "prebuild": "prebuildify --napi --strip",
+    "rebuild:electron": "electron-rebuild -f -w syphon_addon",
+    "bench": "electron test/bench.js",
+    "test": "node --expose-gc test/smoke.js",
+    "test:e2e": "npm --prefix examples/full-demo test",
+    "make-library": "bash scripts/build-library.sh",
+    "prepack": "npm run build:ts"
+  },
+  "dependencies": {
+    "node-addon-api": "^8.3.1",
+    "node-gyp-build": "^4.8.4"
+  },
+  "peerDependencies": {
+    "electron": ">=33"
+  },
+  "peerDependenciesMeta": {
+    "electron": { "optional": true }
+  },
+  "devDependencies": {
+    "@types/node": "^22.14.1",
+    "electron": "^42.3.2",
+    "electron-rebuild": "^3.2.9",
+    "node-gyp": "^11.2.0",
+    "prebuildify": "^6.0.1",
+    "typescript": "^5.8.3"
+  },
+  "keywords": [
+    "syphon",
+    "electron",
+    "macos",
+    "metal",
+    "iosurface",
+    "shared-texture",
+    "zero-copy",
+    "video",
+    "vj",
+    "offscreen"
+  ]
+}

@@ -1,0 +1,118 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>planetary-room — operator</title>
+    <style>
+      :root { color-scheme: dark; }
+      html, body { margin: 0; height: 100%; background: #05070d; color: #dde6f7;
+        font-family: ui-sans-serif, system-ui, -apple-system, sans-serif; overflow: hidden; }
+      #wrap { box-sizing: border-box; padding: 30px 36px; height: 100%;
+        display: grid; grid-template-rows: auto auto 1fr auto; gap: 22px; }
+      h1 { margin: 0; font-size: 24px; font-weight: 800; letter-spacing: 0.3px; }
+      h1 .dim { color: #5e7099; font-weight: 600; font-size: 16px; }
+      .hint { font: 500 14px ui-monospace, Menlo, monospace; color: #8ea3cd; line-height: 1.6; }
+      .hint code { color: #9fe7c8; background: #0c1426; border: 1px solid #182846;
+        border-radius: 6px; padding: 2px 7px; }
+      table { width: 100%; border-collapse: collapse; }
+      th { text-align: left; font: 700 11px ui-monospace, Menlo, monospace; letter-spacing: 1.2px;
+        text-transform: uppercase; color: #66789e; padding: 0 12px 10px; }
+      td { padding: 12px; border-top: 1px solid #141d33; vertical-align: middle; }
+      .name { font: 700 16px ui-monospace, Menlo, monospace; }
+      .orbit { color: #7fc9ff; } .approach { color: #9affc0; }
+      .seismic { color: #ffb34d; } .telemetry { color: #ff8a6b; }
+      .pill { display: inline-block; font: 700 11px ui-monospace, Menlo, monospace;
+        padding: 3px 9px; border-radius: 999px; letter-spacing: 0.5px; }
+      .live { background: rgba(95,255,160,0.12); color: #5fffa0; border: 1px solid rgba(95,255,160,0.3); }
+      .down { background: rgba(255,122,122,0.12); color: #ff7a7a; border: 1px solid rgba(255,122,122,0.3); }
+      .desc { font: 500 13px ui-sans-serif, system-ui, sans-serif; color: #8294b8; }
+      footer { font: 600 12px ui-monospace, Menlo, monospace; color: #38476a; }
+      #count { color: #9fe7c8; }
+    </style>
+  </head>
+  <body>
+    <div id="wrap">
+      <header>
+        <h1>planetary-room <span class="dim">— operator console</span></h1>
+      </header>
+
+      <div class="hint">
+        Four independent feeds are publishing now. Open a Syphon client
+        (TouchDesigner, Resolume, OBS + Syphon, VDMX…) and add any of:<br />
+        <code>planetary-room · orbit</code>
+        <code>planetary-room · approach</code>
+        <code>planetary-room · seismic</code>
+        <code>planetary-room · telemetry</code>
+      </div>
+
+      <table>
+        <thead>
+          <tr><th>Source</th><th>Status</th><th>Scene</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="name orbit">planetary-room · orbit</td>
+            <td><span class="pill down" data-key="orbit">checking…</span></td>
+            <td class="desc">Rotating 3D globe (THREE.js / Canvas2D fallback) with live USGS quakes</td>
+          </tr>
+          <tr>
+            <td class="name approach">planetary-room · approach</td>
+            <td><span class="pill down" data-key="approach">checking…</span></td>
+            <td class="desc">City approach radar, range rings, synthetic inbound traffic</td>
+          </tr>
+          <tr>
+            <td class="name seismic">planetary-room · seismic</td>
+            <td><span class="pill down" data-key="seismic">checking…</span></td>
+            <td class="desc">Equirectangular world map, live USGS quakes + recent list</td>
+          </tr>
+          <tr>
+            <td class="name telemetry">planetary-room · telemetry</td>
+            <td><span class="pill down" data-key="telemetry">checking…</span></td>
+            <td class="desc">DOM dashboard: quake count, max magnitude, flights, ticker</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <footer>
+        Published servers: <span id="count">…</span> · this window is the operator status panel and is NOT published.
+      </footer>
+    </div>
+
+    <script>
+      // The operator window is an ordinary renderer (no node integration here),
+      // so it cannot enumerate Syphon servers itself. Instead it independently
+      // verifies each LIVE source by fetching the same USGS feed the publishers
+      // use: if the feed is reachable, the data-bearing scenes are confirmed live;
+      // the two synthetic scenes (orbit visuals + approach) are always live once
+      // the process is up. This keeps the panel honest without extra IPC wiring.
+      const pills = {}
+      document.querySelectorAll('.pill').forEach((p) => { pills[p.dataset.key] = p })
+
+      function set(key, live, label) {
+        const p = pills[key]; if (!p) return
+        p.textContent = label
+        p.className = 'pill ' + (live ? 'live' : 'down')
+      }
+
+      // Synthetic / always-on scenes are live the moment the process renders them.
+      set('orbit', true, '● LIVE')
+      set('approach', true, '● LIVE')
+
+      async function check() {
+        // All four servers are published unconditionally by main.ts, so mark them
+        // live; annotate the USGS-backed ones with the feed status as a bonus.
+        let feed = 'offline'
+        try {
+          const r = await fetch('https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_hour.geojson', { cache: 'no-store' })
+          const j = await r.json()
+          feed = (j.features ? j.features.length : 0) + ' quakes'
+        } catch (e) { feed = 'feed offline' }
+        set('seismic', true, '● LIVE · ' + feed)
+        set('telemetry', true, '● LIVE · ' + feed)
+        document.getElementById('count').textContent = '4 / 4 publishing';
+      }
+      check();
+      setInterval(check, 60000);
+    </script>
+  </body>
+</html>

@@ -1,0 +1,63 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>live monitor — receiving Syphon</title>
+    <style>
+      html, body { margin: 0; height: 100%; overflow: hidden; background: #000; }
+      #c { display: block; width: 100vw; height: 100vh; }
+      #hud { position: fixed; top: 12px; left: 14px; color: #fff; white-space: pre; z-index: 2;
+             font: 700 18px/1.4 ui-monospace, Menlo, monospace; text-shadow: 0 1px 4px #000; }
+      #badge { position: fixed; right: 14px; bottom: 12px; color: #9ef; z-index: 2;
+               font: 800 20px/1 ui-monospace, Menlo, monospace; text-shadow: 0 1px 4px #000; }
+    </style>
+  </head>
+  <body>
+    <canvas id="c" width="1280" height="720"></canvas>
+    <div id="hud">waiting for frames…</div>
+    <div id="badge">LIVE MONITOR · receiving Syphon</div>
+    <script>
+      // This window does NOT render the scene. The main process receives our own
+      // Syphon output and sends the pixels here; we just draw them. So the number
+      // shown is decoded from the actual received frame — it equals the SENT
+      // number by construction (it's literally the same frame).
+      const { ipcRenderer } = require('electron')
+      const canvas = document.getElementById('c')
+      const ctx = canvas.getContext('2d')
+      const hud = document.getElementById('hud')
+      const off = document.createElement('canvas')
+      const octx = off.getContext('2d')
+      let shown = 0, fps = 0, lastT = 0
+
+      // The source draws a 40×40 marker block at its TOP-LEFT: rgb(frame&255,
+      // frame>>8, 192). After the round-trip it's at the top (upright) or the
+      // bottom (if the frame came back bottom-origin) — read it to decode the
+      // frame number AND detect orientation. Pixels are RGBA.
+      function probe(px, w, h) {
+        const at = (x, y) => { const o = (y * w + x) * 4; return [px[o], px[o + 1], px[o + 2]] }
+        let p = at(8, 8), flipped = false
+        if (Math.abs(p[2] - 192) > 4) { p = at(8, h - 8); flipped = true }
+        const n = Math.abs(p[2] - 192) <= 4 ? p[0] + (p[1] << 8) : null
+        return { n, flipped }
+      }
+
+      ipcRenderer.on('frame', (_e, msg) => {
+        const w = msg.width, h = msg.height
+        const px = msg.pixels // Uint8Array (RGBA), cloned over IPC
+        const now = performance.now()
+        if (lastT) { const dt = now - lastT; if (dt > 0) fps += (1000 / dt - fps) * 0.1 }
+        lastT = now
+        if (off.width !== w) { off.width = w; off.height = h; canvas.width = w; canvas.height = h }
+        const arr = new Uint8ClampedArray(w * h * 4)
+        arr.set(px)
+        octx.putImageData(new ImageData(arr, w, h), 0, 0)
+        const { n, flipped } = probe(px, w, h)
+        if (n !== null) shown = n
+        ctx.setTransform(1, 0, 0, flipped ? -1 : 1, 0, flipped ? h : 0)
+        ctx.drawImage(off, 0, 0)
+        ctx.setTransform(1, 0, 0, 1, 0, 0)
+        hud.textContent = 'RECEIVED #' + shown + '\n' + fps.toFixed(1) + ' fps received\nshowing the sent frames'
+      })
+    </script>
+  </body>
+</html>

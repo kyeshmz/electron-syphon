@@ -1,0 +1,94 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>canvas2d → Syphon</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+      canvas { display: block; width: 100vw; height: 100vh; }
+      #hud { position: fixed; top: 12px; left: 14px; z-index: 10;
+             font: 700 18px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+             color: #fff; text-shadow: 0 1px 4px #000, 0 0 2px #000;
+             white-space: pre; pointer-events: none; letter-spacing: .5px; }
+    </style>
+  </head>
+  <body>
+    <canvas id="c"></canvas>
+    <script>
+      // Plain 2D canvas animation. Whatever you draw here is published to Syphon.
+      const canvas = document.getElementById('c')
+      const ctx = canvas.getContext('2d', { alpha: false })
+      let frame = 0
+
+      function resize() {
+        const dpr = window.devicePixelRatio || 1
+        canvas.width = canvas.clientWidth * dpr
+        canvas.height = canvas.clientHeight * dpr
+      }
+      window.addEventListener('resize', resize)
+      resize()
+
+      function draw(t) {
+        const w = canvas.width, h = canvas.height
+        const time = t / 1000
+        const hue = (time * 20) % 360
+        const bg = ctx.createLinearGradient(0, 0, w, h)
+        bg.addColorStop(0, `hsl(${hue}, 70%, 12%)`)
+        bg.addColorStop(1, `hsl(${(hue + 90) % 360}, 70%, 22%)`)
+        ctx.fillStyle = bg
+        ctx.fillRect(0, 0, w, h)
+
+        const cx = w / 2, cy = h / 2
+        ctx.lineWidth = Math.max(2, w / 400)
+        for (let i = 0; i < 16; i++) {
+          const r = ((time * 120 + i * 50) % (Math.max(w, h) * 0.7)) + 8
+          ctx.strokeStyle = `hsla(${(hue + i * 16) % 360}, 90%, 65%, ${1 - r / (Math.max(w, h) * 0.7)})`
+          ctx.beginPath()
+          ctx.arc(cx, cy, r, 0, Math.PI * 2)
+          ctx.stroke()
+        }
+        const px = cx + Math.cos(time * 1.3) * (w * 0.33)
+        const py = cy + Math.sin(time * 1.7) * (h * 0.33)
+        ctx.fillStyle = `hsl(${(hue + 180) % 360}, 95%, 60%)`
+        ctx.beginPath()
+        ctx.arc(px, py, Math.max(10, w / 36), 0, Math.PI * 2)
+        ctx.fill()
+
+        ctx.fillStyle = '#fff'
+        ctx.textAlign = 'center'
+        ctx.font = `700 ${Math.round(w / 22)}px system-ui, sans-serif`
+        ctx.fillText('canvas2d → Syphon', cx, cy)
+        ctx.font = `500 ${Math.round(w / 48)}px ui-monospace, monospace`
+        ctx.fillText('frame ' + frame++, cx, cy + h * 0.08)
+
+        requestAnimationFrame(draw)
+      }
+      requestAnimationFrame(draw)
+    </script>
+    <div id="hud"></div>
+    <script>
+      // Frame # + timecode overlay — drawn into the page, so it shows in this
+      // window AND in the published Syphon frame. If a preview is unfocused/occluded
+      // macOS throttles it, so its FRAME counter falls behind the offscreen
+      // publisher — that's the "sending faster than rendering on screen" effect.
+      ;(function () {
+        const hud = document.getElementById('hud')
+        const pad = (n, l) => String(n).padStart(l || 2, '0')
+        let frame = 0, t0 = null, last = 0, fps = 0
+        function tick(t) {
+          if (t0 === null) t0 = t
+          const ms = t - t0
+          if (last) { const dt = t - last; if (dt > 0) fps += (1000 / dt - fps) * 0.1 }
+          last = t
+          const s = Math.floor(ms / 1000)
+          const ff = Math.floor((ms % 1000) / (1000 / 60)) // SMPTE frames @60, from wall time
+          const tc = pad(Math.floor(s / 3600)) + ':' + pad(Math.floor(s / 60) % 60) + ':' + pad(s % 60) + ':' + pad(ff)
+          hud.textContent = 'FRAME ' + pad(frame, 6) + '\nTC ' + tc + '\n' + fps.toFixed(1) + ' fps'
+          frame++
+          requestAnimationFrame(tick)
+        }
+        requestAnimationFrame(tick)
+      })()
+    </script>
+  </body>
+</html>

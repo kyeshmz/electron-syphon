@@ -1,0 +1,181 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>signal-delay — portal</title>
+    <style>
+      html, body { margin: 0; height: 100%; overflow: hidden; background: #000;
+                   font-family: system-ui, sans-serif; }
+      /* The portal composites a full-bleed canvas (the incoming WebRTC video,
+         drawn each rAF) + the overlay. Whatever lands here is what Syphon
+         publishes for this source. */
+      #stage { position: fixed; inset: 0; }
+      #c { position: absolute; inset: 0; width: 100vw; height: 100vh; display: block; background: #000; }
+
+      /* Variable-weight overlay — telematic-broadcast styling. */
+      #overlay { position: absolute; inset: 0; pointer-events: none;
+                 text-shadow: 0 2px 12px rgba(0,0,0,.7); }
+      #who { position: absolute; left: 36px; top: 28px; color: #fff; }
+      #who .perf { font-weight: 800; font-size: 56px; line-height: 1;
+                   letter-spacing: 1px; font-variation-settings: 'wght' 800; }
+      #who .city { font-weight: 500; font-size: 26px; opacity: .85; margin-top: 6px;
+                   letter-spacing: 6px; }
+      #live { position: absolute; right: 36px; top: 34px; color: #fff;
+              font-weight: 700; font-size: 22px; letter-spacing: 3px;
+              display: flex; align-items: center; gap: 12px; }
+      #dot { width: 16px; height: 16px; border-radius: 50%; background: #444;
+             box-shadow: 0 0 0 0 rgba(60,230,130,.6); }
+      #dot.on { background: #2fe082; animation: pulse 1.6s infinite; }
+      @keyframes pulse {
+        0%   { box-shadow: 0 0 0 0 rgba(47,224,130,.6); }
+        70%  { box-shadow: 0 0 0 14px rgba(47,224,130,0); }
+        100% { box-shadow: 0 0 0 0 rgba(47,224,130,0); }
+      }
+      #stats { position: absolute; left: 36px; bottom: 30px; color: #fff;
+               font: 600 22px/1.5 ui-monospace, Menlo, monospace; white-space: pre;
+               opacity: .92; }
+      #scan { position: absolute; inset: 0; pointer-events: none; opacity: .12;
+              background: repeating-linear-gradient(0deg, #000 0 2px, transparent 2px 4px); }
+    </style>
+  </head>
+  <body>
+    <div id="stage">
+      <!-- We draw the received <video> onto this canvas every rAF. A bare
+           <video> element is not reliably captured by offscreen paint, so the
+           canvas is the robust path; the <video> itself stays hidden. -->
+      <canvas id="c" width="1280" height="720"></canvas>
+      <div id="overlay">
+        <div id="who">
+          <div class="perf" id="perf">PERFORMER #?</div>
+          <div class="city" id="city">CONNECTING</div>
+        </div>
+        <div id="live"><span id="dot"></span><span id="livetxt">STANDBY</span></div>
+        <div id="stats">latency  —  ms\njitter   —  ms\nfps      —</div>
+      </div>
+      <div id="scan"></div>
+    </div>
+    <video id="v" autoplay muted playsinline style="display:none"></video>
+
+    <script>
+      // Portal #id. It receives ONE WebRTC track from the sender and composites
+      // video + overlay; the offscreen window's paint of this is published to
+      // Syphon. nodeIntegration gives us require('electron') for signaling.
+      const { ipcRenderer } = require('electron')
+      const params = new URLSearchParams(location.search)
+      const ID = String(params.get('id') || '1')
+
+      const PEERS = {
+        '1': { city: 'TOKYO' }, '2': { city: 'BERLIN' }, '3': { city: 'SÃO PAULO' },
+        '4': { city: 'LAGOS' }, '5': { city: 'MONTRÉAL' }, '6': { city: 'SEOUL' }
+      }
+      document.getElementById('perf').textContent = 'PERFORMER #' + ID
+      document.getElementById('city').textContent = (PEERS[ID] || { city: 'REMOTE' }).city
+
+      const video = document.getElementById('v')
+      const canvas = document.getElementById('c')
+      const ctx = canvas.getContext('2d', { alpha: false })
+      const dot = document.getElementById('dot')
+      const livetxt = document.getElementById('livetxt')
+      const stats = document.getElementById('stats')
+
+      // Until video arrives, keep the canvas obviously non-black with a soft
+      // standby field, so the source is never a black frame even pre-connect.
+      let haveVideo = false
+      let fps = 0, lastDraw = 0
+
+      function draw(now) {
+        const w = canvas.width, h = canvas.height
+        if (lastDraw) { const dt = now - lastDraw; if (dt > 0) fps += (1000 / dt - fps) * 0.1 }
+        lastDraw = now
+
+        if (haveVideo && video.readyState >= 2 && video.videoWidth > 0) {
+          // Full-bleed draw of the live remote video (cover fit).
+          const vw = video.videoWidth, vh = video.videoHeight
+          const scale = Math.max(w / vw, h / vh)
+          const dw = vw * scale, dh = vh * scale
+          ctx.drawImage(video, (w - dw) / 2, (h - dh) / 2, dw, dh)
+        } else {
+          // Standby field — animated so it's plainly a live source, not black.
+          const t = now / 1000
+          const g = ctx.createLinearGradient(0, 0, w, h)
+          g.addColorStop(0, `hsl(${(t * 20) % 360}, 40%, 8%)`)
+          g.addColorStop(1, `hsl(${(t * 20 + 60) % 360}, 45%, 16%)`)
+          ctx.fillStyle = g
+          ctx.fillRect(0, 0, w, h)
+          ctx.fillStyle = 'rgba(255,255,255,0.10)'
+          ctx.beginPath()
+          ctx.arc(w / 2 + Math.cos(t) * 120, h / 2 + Math.sin(t * 1.3) * 80, 60, 0, Math.PI * 2)
+          ctx.fill()
+        }
+        requestAnimationFrame(draw)
+      }
+      requestAnimationFrame(draw)
+
+      // ---- WebRTC: the portal is the ANSWERER. ----
+      const pc = new RTCPeerConnection({ iceServers: [] })
+
+      pc.ontrack = (e) => {
+        if (video.srcObject !== e.streams[0]) {
+          video.srcObject = e.streams[0]
+          ipcRenderer.send('portalState', { id: Number(ID), state: 'track-received' })
+          video.play()
+            .then(() => { haveVideo = true; ipcRenderer.send('portalState', { id: Number(ID), state: 'video-playing' }) })
+            .catch(() => { haveVideo = true })
+        }
+      }
+      pc.onicecandidate = (e) => {
+        if (e.candidate) {
+          ipcRenderer.send('signal', {
+            to: 'sender', from: ID, kind: 'ice', data: e.candidate.toJSON()
+          })
+        }
+      }
+      pc.onconnectionstatechange = () => {
+        const st = pc.connectionState
+        ipcRenderer.send('portalState', { id: Number(ID), state: st })
+        const on = st === 'connected'
+        dot.classList.toggle('on', on)
+        livetxt.textContent = on ? 'LIVE' : st.toUpperCase()
+      }
+
+      ipcRenderer.on('signal', (_e, msg) => {
+        if (msg.from !== 'sender') return
+        if (msg.kind === 'offer') {
+          pc.setRemoteDescription(msg.data)
+            .then(() => pc.createAnswer())
+            .then((ans) => pc.setLocalDescription(ans).then(() => ans))
+            .then((ans) => {
+              ipcRenderer.send('signal', {
+                to: 'sender', from: ID, kind: 'answer', data: { type: ans.type, sdp: ans.sdp }
+              })
+            })
+            .catch((err) => ipcRenderer.send('portalState', { id: Number(ID), state: 'answer-error: ' + err }))
+        } else if (msg.kind === 'ice') {
+          pc.addIceCandidate(msg.data).catch(() => { /* late/duplicate candidate */ })
+        }
+      })
+
+      // ---- Live latency / jitter from getStats(), ~1 Hz. ----
+      setInterval(async () => {
+        let rttMs = null, jitterMs = null, inFps = null
+        try {
+          const report = await pc.getStats()
+          report.forEach((s) => {
+            if (s.type === 'inbound-rtp' && s.kind === 'video') {
+              if (typeof s.jitter === 'number') jitterMs = s.jitter * 1000
+              if (typeof s.framesPerSecond === 'number') inFps = s.framesPerSecond
+            }
+            if (s.type === 'candidate-pair' && (s.nominated || s.state === 'succeeded')) {
+              if (typeof s.currentRoundTripTime === 'number') rttMs = s.currentRoundTripTime * 1000
+            }
+          })
+        } catch { /* stats not ready */ }
+        const f = (v, u) => (v == null ? '—' : v.toFixed(u))
+        stats.textContent =
+          'latency  ' + f(rttMs, 1) + '  ms\n' +
+          'jitter   ' + f(jitterMs, 2) + '  ms\n' +
+          'fps      ' + (inFps != null ? inFps.toFixed(0) : fps.toFixed(0))
+      }, 1000)
+    </script>
+  </body>
+</html>

@@ -1,0 +1,66 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>frame-test → Syphon</title>
+    <style>
+      html, body { margin: 0; height: 100%; overflow: hidden; background: #000; }
+      #c { display: block; width: 100vw; height: 100vh; }
+      /* Human-readable frame # + timecode, centered. Composited on top of the
+         canvas — kept centered so it never overlaps the pixel the client samples. */
+      #label { position: fixed; inset: 0; display: grid; place-items: center; text-align: center;
+               color: #fff; font: 800 72px/1.15 ui-monospace, Menlo, monospace;
+               text-shadow: 0 2px 14px #000, 0 0 3px #000; pointer-events: none; }
+      #label small { display: block; margin-top: 10px; font-size: 26px; font-weight: 600; opacity: .85; }
+    </style>
+  </head>
+  <body>
+    <canvas id="c"></canvas>
+    <div id="label"></div>
+    <script>
+      // This page encodes its own frame counter into the pixels so a SyphonClient
+      // can read back EXACTLY which frame arrived:
+      //   the whole canvas is filled with rgb(frame&255, (frame>>8)&255, 192)
+      // A uniform fill means the client's averaged sample decodes the number exactly;
+      // b=192 is a fixed marker so the receiver can sanity-check it's reading us.
+      const canvas = document.getElementById('c')
+      const ctx = canvas.getContext('2d', { alpha: false })
+      const label = document.getElementById('label')
+
+      function resize() {
+        const dpr = window.devicePixelRatio || 1
+        canvas.width = Math.round(canvas.clientWidth * dpr)
+        canvas.height = Math.round(canvas.clientHeight * dpr)
+      }
+      window.addEventListener('resize', resize)
+      resize()
+
+      let frame = 0
+      let running = true
+      let t0 = null
+      const pad = (n, l) => String(n).padStart(l || 2, '0')
+
+      // Exposed to the Electron main process (via executeJavaScript):
+      window.__frame = 0
+      window.__stop = function () { running = false; return window.__frame } // freeze
+
+      function draw(t) {
+        if (t0 === null) t0 = t
+        const ms = t - t0, s = Math.floor(ms / 1000)
+        const r = frame & 255, g = (frame >> 8) & 255, b = 192
+        ctx.fillStyle = 'rgb(' + r + ',' + g + ',' + b + ')'
+        ctx.fillRect(0, 0, canvas.width, canvas.height)
+
+        const ff = Math.floor((ms % 1000) / (1000 / 60))
+        const tc = pad(Math.floor(s / 3600)) + ':' + pad(Math.floor(s / 60) % 60) + ':' + pad(s % 60) + ':' + pad(ff)
+        label.innerHTML = 'FRAME ' + frame +
+          '<small>TC ' + tc + '&nbsp; · &nbsp;encoded rgb(' + r + ',' + g + ',' + b + ')' +
+          (running ? '' : '&nbsp; · &nbsp;STOPPED') + '</small>'
+
+        window.__frame = frame
+        if (running) { frame++; requestAnimationFrame(draw) }
+      }
+      requestAnimationFrame(draw)
+    </script>
+  </body>
+</html>

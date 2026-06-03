@@ -1,0 +1,125 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>planetary-room · telemetry</title>
+    <style>
+      :root { color-scheme: dark; }
+      html, body { margin: 0; height: 100%; width: 100%; background: #04060c; overflow: hidden;
+        font-family: ui-sans-serif, system-ui, -apple-system, "SF Pro Display", sans-serif; color: #e8eefc; }
+      #wrap { box-sizing: border-box; width: 1280px; height: 720px; padding: 36px 44px;
+        display: grid; grid-template-rows: auto 1fr auto; gap: 24px; }
+      header { display: flex; align-items: baseline; justify-content: space-between; }
+      h1 { margin: 0; font-size: 30px; font-weight: 800; letter-spacing: 0.5px; }
+      h1 .dim { color: #5e7099; font-weight: 600; }
+      #status { font: 600 15px ui-monospace, Menlo, monospace; color: #ffd27a; }
+      #status.live { color: #5fffa0; }
+      #status.offline { color: #ff7a7a; }
+      #grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 22px; align-content: center; }
+      .card { background: linear-gradient(160deg, #0a1020, #070b15); border: 1px solid #18233f;
+        border-radius: 16px; padding: 22px 24px; display: flex; flex-direction: column; justify-content: space-between; }
+      .card .label { font: 600 13px ui-monospace, Menlo, monospace; letter-spacing: 1.5px;
+        text-transform: uppercase; color: #6c80a8; }
+      .card .num { font-weight: 800; font-size: 84px; line-height: 1; margin-top: 14px;
+        font-variant-numeric: tabular-nums; letter-spacing: -2px;
+        /* variable-weight numerals when SF/Inter variable font is present */
+        font-variation-settings: "wght" 800; }
+      .card .sub { font: 500 14px ui-monospace, Menlo, monospace; color: #7e93bd; margin-top: 10px; }
+      .accent-q .num { color: #7fc9ff; }
+      .accent-m .num { color: #ff8a6b; }
+      .accent-f .num { color: #9affc0; }
+      #ticker { border-top: 1px solid #18233f; padding-top: 16px; overflow: hidden; white-space: nowrap; }
+      #ticker .lbl { font: 700 13px ui-monospace, Menlo, monospace; letter-spacing: 1.5px; color: #6c80a8; }
+      #track { display: inline-block; padding-left: 100%; animation: roll 38s linear infinite;
+        font: 600 18px ui-monospace, Menlo, monospace; color: #cdd9f2; }
+      #track .q { margin-right: 42px; }
+      #track .big { color: #ff8a6b; }
+      #track .mid { color: #ffc06b; }
+      #track .low { color: #7fc9ff; }
+      @keyframes roll { from { transform: translateX(0); } to { transform: translateX(-100%); } }
+      footer { font: 600 12px ui-monospace, Menlo, monospace; color: #34425f; }
+    </style>
+  </head>
+  <body>
+    <div id="wrap">
+      <header>
+        <h1>TELEMETRY <span class="dim">· planetary control room</span></h1>
+        <div id="status">connecting…</div>
+      </header>
+
+      <div id="grid">
+        <div class="card accent-q">
+          <div class="label">Quakes · past hour</div>
+          <div class="num" id="n-quakes">0</div>
+          <div class="sub" id="s-quakes">USGS all_hour feed</div>
+        </div>
+        <div class="card accent-m">
+          <div class="label">Max magnitude</div>
+          <div class="num" id="n-mag">—</div>
+          <div class="sub" id="s-mag">strongest this hour</div>
+        </div>
+        <div class="card accent-f">
+          <div class="label">Flights tracked</div>
+          <div class="num" id="n-flights">0</div>
+          <div class="sub">synthetic approach sim</div>
+        </div>
+      </div>
+
+      <div id="ticker">
+        <span class="lbl">LATEST &nbsp;&nbsp;</span>
+        <span id="track">awaiting USGS feed…</span>
+      </div>
+    </div>
+    <footer style="position:fixed;left:44px;bottom:14px">SYPHON · planetary-room · telemetry</footer>
+
+    <script>
+      // DOM/CSS dashboard driven by the same live USGS feed. The chrome (cards,
+      // labels, zeros) is in the static DOM, so this source is non-black on the
+      // first paint — the numbers just fill in once the feed arrives. Flights are
+      // a synthetic counter to mirror the approach scope. Resilient if offline.
+      const $ = (id) => document.getElementById(id)
+      const status = $('status')
+
+      // Synthetic flight count that wanders, matching approach.html's vibe.
+      let flights = 7
+      setInterval(() => {
+        flights = Math.max(5, Math.min(11, flights + (Math.random() < 0.5 ? -1 : 1)))
+        $('n-flights').textContent = flights
+      }, 5000)
+      $('n-flights').textContent = flights
+
+      function setStatus(state, detail) {
+        status.className = state
+        status.textContent = (state === 'live' ? '● LIVE' : state === 'offline' ? '● OFFLINE' : '○ connecting…') + (detail ? '  ' + detail : '')
+      }
+
+      async function pull() {
+        try {
+          const r = await fetch('https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_hour.geojson', { cache: 'no-store' })
+          const j = await r.json()
+          const feats = (j.features || []).map((f) => ({
+            mag: f.properties.mag == null ? 0 : f.properties.mag,
+            place: f.properties.place || 'unknown',
+            time: f.properties.time || 0
+          })).sort((a, b) => b.time - a.time)
+
+          $('n-quakes').textContent = feats.length
+          const maxMag = feats.reduce((m, q) => Math.max(m, q.mag), -Infinity)
+          $('n-mag').textContent = feats.length ? 'M' + maxMag.toFixed(1) : '—'
+
+          const cls = (m) => m >= 5 ? 'big' : m >= 3 ? 'mid' : 'low'
+          const items = feats.slice(0, 24).map((q) =>
+            `<span class="q ${cls(q.mag)}">M${q.mag.toFixed(1)} — ${q.place}</span>`).join('')
+          $('track').innerHTML = items || 'no events reported in the past hour'
+
+          const now = new Date()
+          setStatus('live', `${feats.length} events · ${now.toLocaleTimeString()}`)
+        } catch (e) {
+          setStatus('offline', 'feed unreachable — dashboard live')
+        }
+      }
+      pull()
+      setInterval(pull, 60000)
+    </script>
+  </body>
+</html>

@@ -1,0 +1,82 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>signal-delay — operator</title>
+    <style>
+      :root { color-scheme: dark; }
+      html, body { margin: 0; height: 100%; background: #07080c; color: #e9edf5;
+                   font-family: system-ui, sans-serif; }
+      .wrap { padding: 28px 34px; }
+      h1 { margin: 0 0 4px; font-size: 24px; font-weight: 800; letter-spacing: .3px; }
+      .sub { margin: 0 0 22px; color: #8b93a7; font-size: 14px; line-height: 1.5; }
+      .grid { display: grid; gap: 14px; grid-template-columns: 1fr; }
+      .card { background: #0f1320; border: 1px solid #1c2233; border-radius: 12px;
+              padding: 16px 18px; display: flex; align-items: center; gap: 16px; }
+      .dot { width: 14px; height: 14px; border-radius: 50%; background: #3a4256; flex: 0 0 auto; }
+      .dot.connected { background: #2fe082; box-shadow: 0 0 12px #2fe08288; }
+      .dot.connecting, .dot.checking, .dot.new { background: #f2c14e; }
+      .dot.failed, .dot.disconnected, .dot.closed { background: #ef5d5d; }
+      .name { font: 700 16px ui-monospace, Menlo, monospace; }
+      .meta { color: #8b93a7; font-size: 13px; margin-top: 3px; }
+      .state { margin-left: auto; font: 700 13px ui-monospace, Menlo, monospace;
+               text-transform: uppercase; letter-spacing: 1px; color: #aeb6c9; }
+      .foot { margin-top: 22px; color: #6b7488; font-size: 12.5px; line-height: 1.6; }
+      code { color: #9ecbff; background: #121828; padding: 1px 6px; border-radius: 5px; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <h1>signal-delay · operator</h1>
+      <p class="sub">
+        One offscreen WebRTC portal per remote performer, each published as its
+        own Syphon source. The portals are NOT on screen — open a Syphon client
+        (e.g. a Simple Client, or a TouchDesigner <em>Syphon Spout In</em> TOP) to
+        watch them. This dashboard is the only visible window and is NOT published.
+      </p>
+      <div class="grid" id="grid"></div>
+      <div class="foot" id="foot"></div>
+    </div>
+
+    <script>
+      const { ipcRenderer } = require('electron')
+      const params = new URLSearchParams(location.search)
+      const N = Number(params.get('n') || 3)
+
+      const grid = document.getElementById('grid')
+      const rows = {}
+      for (let k = 1; k <= N; k++) {
+        const card = document.createElement('div')
+        card.className = 'card'
+        card.innerHTML =
+          '<span class="dot" id="dot' + k + '"></span>' +
+          '<div><div class="name">signal-delay · portal #' + k + '</div>' +
+          '<div class="meta" id="meta' + k + '">offscreen compositor → Syphon</div></div>' +
+          '<div class="state" id="state' + k + '">standby</div>'
+        grid.appendChild(card)
+        rows[k] = card
+      }
+
+      function setState(k, state) {
+        const dot = document.getElementById('dot' + k)
+        const lbl = document.getElementById('state' + k)
+        if (!dot || !lbl) return
+        dot.className = 'dot ' + String(state).split(/[\s-]/)[0]
+        lbl.textContent = state
+      }
+      ipcRenderer.on('portalState', (_e, p) => setState(p.id, p.state))
+      ipcRenderer.on('senderState', (_e, p) => {
+        const m = document.getElementById('meta' + p.id)
+        if (m) m.textContent = 'sender→portal: ' + p.state
+      })
+
+      document.getElementById('foot').innerHTML =
+        'Sources published: ' +
+        Array.from({ length: N }, (_, i) =>
+          '<code>signal-delay · portal #' + (i + 1) + '</code>').join(' ') +
+        '<br>The synthetic performers run with zero network (loopback host ' +
+        'candidates, no STUN/TURN). To add a REAL phone as performer #' + (N + 1) +
+        ', see the LAN-sender note in the example README.'
+    </script>
+  </body>
+</html>

@@ -1,0 +1,6 @@
+allowBuilds:
+  electron-syphon: true
+  electron-winstaller: true
+  esbuild: true
+minimumReleaseAgeExclude:
+  - electron@42.3.2

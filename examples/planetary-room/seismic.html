@@ -1,0 +1,181 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>planetary-room · seismic</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #05070d; overflow: hidden; }
+      canvas { display: block; width: 100vw; height: 100vh; }
+    </style>
+  </head>
+  <body>
+    <canvas id="c" width="1280" height="720"></canvas>
+    <script>
+      // Equirectangular world quake map — PLAIN Canvas2D, no CDN, no module.
+      // The map graticule + coastline + chrome draw on the very first frame, so
+      // this source is non-black before any network reply. Live USGS quakes
+      // (past hour) are then overlaid as magnitude-sized pulsing dots, with a
+      // side list of the most recent events. Resilient by design.
+      const canvas = document.getElementById('c')
+      const ctx = canvas.getContext('2d', { alpha: false })
+      const W = 1280, H = 720
+
+      // Map panel geometry: leave a column on the right for the recent list.
+      const MAP = { x: 24, y: 64, w: 880, h: 624 }
+
+      // Coarse coastline outlines as [lon,lat] polylines. Hand-simplified — just
+      // enough to read as continents without any external data file.
+      const COAST = [
+        // North America
+        [[-158,21],[-130,55],[-95,70],[-82,28],[-97,16],[-110,23],[-125,40],[-158,21]],
+        // South America
+        [[-80,8],[-62,11],[-35,-6],[-58,-34],[-75,-52],[-81,-5],[-80,8]],
+        // Europe + west Asia
+        [[-10,36],[3,43],[12,45],[28,41],[40,47],[30,70],[5,60],[-9,53],[-10,36]],
+        // Africa
+        [[-17,15],[10,37],[33,31],[51,12],[40,-5],[18,-35],[9,4],[-17,15]],
+        // Asia
+        [[40,47],[60,40],[90,30],[122,40],[135,55],[100,70],[60,68],[40,47]],
+        // India
+        [[68,24],[88,22],[80,8],[72,16],[68,24]],
+        // SE Asia / Indonesia
+        [[95,6],[120,0],[140,-8],[105,-8],[95,6]],
+        // Australia
+        [[114,-22],[135,-12],[153,-28],[140,-38],[118,-34],[114,-22]]
+      ]
+
+      const proj = (lon, lat) => ({
+        x: MAP.x + ((lon + 180) / 360) * MAP.w,
+        y: MAP.y + ((90 - lat) / 180) * MAP.h
+      })
+
+      let quakes = []     // {lon,lat,mag,place,time}
+      let lastFetch = 0
+      let fetchState = 'connecting'
+      const QUAKE_COLOR = (m) => m >= 5 ? '#ff5a5f' : m >= 3 ? '#ffb34d' : '#5fd0ff'
+
+      async function pull() {
+        fetchState = 'connecting'
+        try {
+          const r = await fetch('https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_hour.geojson', { cache: 'no-store' })
+          const j = await r.json()
+          quakes = (j.features || []).map((f) => ({
+            lon: f.geometry.coordinates[0],
+            lat: f.geometry.coordinates[1],
+            mag: f.properties.mag == null ? 0 : f.properties.mag,
+            place: f.properties.place || 'unknown',
+            time: f.properties.time || 0
+          })).sort((a, b) => b.time - a.time)
+          lastFetch = Date.now()
+          fetchState = 'live'
+        } catch (e) {
+          fetchState = 'offline'
+        }
+      }
+      pull()
+      setInterval(pull, 60000)
+
+      function grid() {
+        ctx.strokeStyle = 'rgba(90,140,200,0.16)'
+        ctx.lineWidth = 1
+        for (let lon = -180; lon <= 180; lon += 30) {
+          const a = proj(lon, 90), b = proj(lon, -90)
+          ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke()
+        }
+        for (let lat = -60; lat <= 60; lat += 30) {
+          const a = proj(-180, lat), b = proj(180, lat)
+          ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke()
+        }
+        // equator brighter
+        ctx.strokeStyle = 'rgba(110,170,235,0.30)'
+        const e1 = proj(-180, 0), e2 = proj(180, 0)
+        ctx.beginPath(); ctx.moveTo(e1.x, e1.y); ctx.lineTo(e2.x, e2.y); ctx.stroke()
+      }
+
+      function coast() {
+        ctx.strokeStyle = 'rgba(120,180,235,0.55)'
+        ctx.lineWidth = 1.4
+        for (const poly of COAST) {
+          ctx.beginPath()
+          poly.forEach((p, i) => { const q = proj(p[0], p[1]); i ? ctx.lineTo(q.x, q.y) : ctx.moveTo(q.x, q.y) })
+          ctx.stroke()
+        }
+      }
+
+      function frame(t) {
+        const time = t / 1000
+
+        // Background + faint vignette.
+        ctx.fillStyle = '#05070d'
+        ctx.fillRect(0, 0, W, H)
+
+        // Map panel.
+        ctx.fillStyle = '#070b16'
+        ctx.fillRect(MAP.x, MAP.y, MAP.w, MAP.h)
+        ctx.strokeStyle = 'rgba(110,160,220,0.35)'
+        ctx.lineWidth = 1
+        ctx.strokeRect(MAP.x + 0.5, MAP.y + 0.5, MAP.w, MAP.h)
+        grid()
+        coast()
+
+        // Quakes — pulsing rings sized by magnitude.
+        for (const q of quakes) {
+          const p = proj(q.lon, q.lat)
+          const base = 2 + Math.max(0, q.mag) * 2.2
+          const pulse = (Math.sin(time * 2.2 + q.lon * 0.05) * 0.5 + 0.5)
+          const col = QUAKE_COLOR(q.mag)
+          ctx.beginPath()
+          ctx.arc(p.x, p.y, base + pulse * 6, 0, Math.PI * 2)
+          ctx.fillStyle = col + '22'
+          ctx.fill()
+          ctx.beginPath()
+          ctx.arc(p.x, p.y, base, 0, Math.PI * 2)
+          ctx.fillStyle = col
+          ctx.fill()
+        }
+
+        // Header.
+        ctx.fillStyle = '#dfe9ff'
+        ctx.font = '700 26px ui-monospace, Menlo, monospace'
+        ctx.textAlign = 'left'
+        ctx.fillText('SEISMIC · global quakes (past hour)', MAP.x, 44)
+        ctx.font = '500 14px ui-monospace, Menlo, monospace'
+        const dot = fetchState === 'live' ? '#5fffa0' : fetchState === 'offline' ? '#ff7a7a' : '#ffd27a'
+        ctx.fillStyle = dot
+        ctx.fillText('●', W - 360, 44)
+        ctx.fillStyle = '#9fb2d8'
+        const ago = lastFetch ? Math.round((Date.now() - lastFetch) / 1000) + 's ago' : '—'
+        ctx.fillText(`USGS ${fetchState} · ${quakes.length} events · ${ago}`, W - 340, 44)
+
+        // Right column: most recent quakes.
+        const LX = MAP.x + MAP.w + 28
+        ctx.fillStyle = '#aebfe0'
+        ctx.font = '700 16px ui-monospace, Menlo, monospace'
+        ctx.fillText('MOST RECENT', LX, MAP.y + 6)
+        ctx.font = '500 13px ui-monospace, Menlo, monospace'
+        let yy = MAP.y + 34
+        const rows = quakes.slice(0, 18)
+        if (!rows.length) {
+          ctx.fillStyle = '#5d6b88'
+          ctx.fillText(fetchState === 'offline' ? 'feed offline — map live' : 'awaiting feed…', LX, yy)
+        }
+        for (const q of rows) {
+          ctx.fillStyle = QUAKE_COLOR(q.mag)
+          ctx.fillText('M' + q.mag.toFixed(1), LX, yy)
+          ctx.fillStyle = '#c4d2ee'
+          const place = q.place.length > 30 ? q.place.slice(0, 29) + '…' : q.place
+          ctx.fillText(place, LX + 52, yy)
+          yy += 21
+        }
+
+        // Footer source name.
+        ctx.fillStyle = '#3f4d6b'
+        ctx.font = '600 12px ui-monospace, Menlo, monospace'
+        ctx.fillText('SYPHON · planetary-room · seismic', MAP.x, H - 14)
+
+        requestAnimationFrame(frame)
+      }
+      requestAnimationFrame(frame)
+    </script>
+  </body>
+</html>

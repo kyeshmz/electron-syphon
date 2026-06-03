@@ -1,0 +1,26 @@
+{
+  "name": "electron-syphon-examples",
+  "version": "1.0.0",
+  "description": "Minimal electron-syphon examples, one folder per scenario (TypeScript)",
+  "main": "dist/simple-window/main.js",
+  "private": true,
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "simple-window": "npm run build && electron dist/simple-window/main.js",
+    "webgl": "npm run build && electron dist/webgl/main.js",
+    "webgpu": "npm run build && electron dist/webgpu/main.js",
+    "multi-window": "npm run build && electron dist/multi-window/main.js",
+    "frame-test": "npm run build && electron dist/frame-test/main.js",
+    "single-render": "npm run build && electron dist/single-render/main.js",
+    "planetary-room": "npm run build && electron dist/planetary-room/main.js",
+    "signal-delay": "npm run build && electron dist/signal-delay/main.js"
+  },
+  "dependencies": {
+    "electron-syphon": "file:.."
+  },
+  "devDependencies": {
+    "@types/node": "^22.14.1",
+    "electron": "^42.3.2",
+    "typescript": "^5.8.3"
+  }
+}

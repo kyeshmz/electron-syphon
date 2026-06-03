@@ -1,0 +1,117 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>webgpu → Syphon</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #101418; overflow: hidden; }
+      canvas { display: block; width: 100vw; height: 100vh; }
+      #hud { position: fixed; top: 12px; left: 14px; z-index: 10;
+             font: 700 18px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+             color: #fff; text-shadow: 0 1px 4px #000, 0 0 2px #000;
+             white-space: pre; pointer-events: none; letter-spacing: .5px; }
+      #msg { position: fixed; inset: 0; display: grid; place-items: center;
+             color: #fff; font: 600 28px system-ui; }
+    </style>
+  </head>
+  <body>
+    <canvas id="c"></canvas>
+    <div id="msg" style="display:none"></div>
+    <script>
+      // A WebGPU full-screen gradient. Published like any other rendered page.
+      const canvas = document.getElementById('c')
+      const msg = document.getElementById('msg')
+
+      async function main() {
+        if (!navigator.gpu) {
+          msg.textContent = 'WebGPU is not available in this build'
+          msg.style.display = 'grid'
+          return
+        }
+        const adapter = await navigator.gpu.requestAdapter()
+        const device = await adapter.requestDevice()
+        const ctx = canvas.getContext('webgpu')
+        const format = navigator.gpu.getPreferredCanvasFormat()
+        const dpr = window.devicePixelRatio || 1
+        canvas.width = canvas.clientWidth * dpr
+        canvas.height = canvas.clientHeight * dpr
+        ctx.configure({ device, format, alphaMode: 'opaque' })
+
+        const module = device.createShaderModule({
+          code: `
+          @group(0) @binding(0) var<uniform> t : f32;
+          @vertex fn vs(@builtin(vertex_index) i : u32) -> @builtin(position) vec4f {
+            var p = array<vec2f,3>(vec2f(-1.,-1.), vec2f(3.,-1.), vec2f(-1.,3.));
+            return vec4f(p[i], 0., 1.);
+          }
+          @fragment fn fs(@builtin(position) c : vec4f) -> @location(0) vec4f {
+            let uv = c.xy / vec2f(${canvas.width}., ${canvas.height}.);
+            let v = sin(uv.x*10.+t) + sin(uv.y*10.+t*1.3) + sin(length(uv-0.5)*18.-t*2.);
+            let col = 0.5 + 0.5*cos(vec3f(0.,2.,4.) + v + t*0.2);
+            return vec4f(col, 1.);
+          }`
+        })
+        const ubuf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST })
+        const pipeline = device.createRenderPipeline({
+          layout: 'auto',
+          vertex: { module, entryPoint: 'vs' },
+          fragment: { module, entryPoint: 'fs', targets: [{ format }] },
+          primitive: { topology: 'triangle-list' }
+        })
+        const bind = device.createBindGroup({
+          layout: pipeline.getBindGroupLayout(0),
+          entries: [{ binding: 0, resource: { buffer: ubuf } }]
+        })
+
+        function frame(t) {
+          device.queue.writeBuffer(ubuf, 0, new Float32Array([t / 1000]))
+          const enc = device.createCommandEncoder()
+          const pass = enc.beginRenderPass({
+            colorAttachments: [{
+              view: ctx.getCurrentTexture().createView(),
+              clearValue: { r: 0, g: 0, b: 0, a: 1 },
+              loadOp: 'clear', storeOp: 'store'
+            }]
+          })
+          pass.setPipeline(pipeline)
+          pass.setBindGroup(0, bind)
+          pass.draw(3)
+          pass.end()
+          device.queue.submit([enc.finish()])
+          requestAnimationFrame(frame)
+        }
+        requestAnimationFrame(frame)
+      }
+      main().catch((e) => {
+        msg.textContent = 'WebGPU init failed: ' + e
+        msg.style.display = 'grid'
+        console.error(e)
+      })
+    </script>
+    <div id="hud"></div>
+    <script>
+      // Frame # + timecode overlay — drawn into the page, so it shows in this
+      // window AND in the published Syphon frame. If a preview is unfocused/occluded
+      // macOS throttles it, so its FRAME counter falls behind the offscreen
+      // publisher — that's the "sending faster than rendering on screen" effect.
+      ;(function () {
+        const hud = document.getElementById('hud')
+        const pad = (n, l) => String(n).padStart(l || 2, '0')
+        let frame = 0, t0 = null, last = 0, fps = 0
+        function tick(t) {
+          if (t0 === null) t0 = t
+          const ms = t - t0
+          if (last) { const dt = t - last; if (dt > 0) fps += (1000 / dt - fps) * 0.1 }
+          last = t
+          const s = Math.floor(ms / 1000)
+          const ff = Math.floor((ms % 1000) / (1000 / 60)) // SMPTE frames @60, from wall time
+          const tc = pad(Math.floor(s / 3600)) + ':' + pad(Math.floor(s / 60) % 60) + ':' + pad(s % 60) + ':' + pad(ff)
+          hud.textContent = 'FRAME ' + pad(frame, 6) + '\nTC ' + tc + '\n' + fps.toFixed(1) + ' fps'
+          frame++
+          requestAnimationFrame(tick)
+        }
+        requestAnimationFrame(tick)
+      })()
+    </script>
+  </body>
+</html>

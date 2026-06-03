@@ -1,0 +1,249 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>planetary-room · orbit</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #02030a; overflow: hidden; }
+      #c, #fallback { display: block; width: 100vw; height: 100vh; position: absolute; inset: 0; }
+      #fallback { display: none; }
+      #hud { position: fixed; top: 22px; left: 28px; z-index: 5; pointer-events: none;
+        font: 700 24px ui-monospace, Menlo, monospace; color: #d7e3ff; text-shadow: 0 2px 8px #000; }
+      #hud .sub { font: 500 13px ui-monospace, Menlo, monospace; color: #7f93c0; margin-top: 6px; }
+      #foot { position: fixed; left: 28px; bottom: 16px; z-index: 5;
+        font: 600 12px ui-monospace, Menlo, monospace; color: #36456a; }
+    </style>
+    <!-- Electron 42 supports importmaps; THREE loads from a CDN as an ESM module.
+         If the CDN/network is down the module script throws, and the inline
+         fallback below draws a Canvas2D orthographic globe so the source still
+         renders non-black. -->
+    <script type="importmap">
+      { "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+    </script>
+  </head>
+  <body>
+    <canvas id="c"></canvas>
+    <canvas id="fallback" width="1280" height="720"></canvas>
+    <div id="hud">ORBIT · global view<div class="sub" id="hud-sub">initializing renderer…</div></div>
+    <div id="foot">SYPHON · planetary-room · orbit</div>
+
+    <script>
+      // Shared live quake state — both the THREE path and the Canvas2D fallback
+      // read this. Fetched in the renderer (USGS sends CORS headers).
+      window.__quakes = []
+      window.__feedState = 'connecting'
+      async function pullQuakes() {
+        try {
+          const r = await fetch('https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_hour.geojson', { cache: 'no-store' })
+          const j = await r.json()
+          window.__quakes = (j.features || []).map((f) => ({
+            lon: f.geometry.coordinates[0], lat: f.geometry.coordinates[1],
+            mag: f.properties.mag == null ? 0 : f.properties.mag
+          }))
+          window.__feedState = 'live'
+        } catch (e) { window.__feedState = 'offline' }
+        const sub = document.getElementById('hud-sub')
+        if (sub) sub.textContent = `USGS ${window.__feedState} · ${window.__quakes.length} quakes`
+      }
+      pullQuakes(); setInterval(pullQuakes, 60000)
+
+      // Synthetic flights easing along great-circle-ish arcs (no OpenSky dep).
+      function mkFlight() {
+        return {
+          lon0: Math.random() * 360 - 180, lat0: Math.random() * 140 - 70,
+          lon1: Math.random() * 360 - 180, lat1: Math.random() * 140 - 70,
+          t: Math.random(), speed: 0.02 + Math.random() * 0.03
+        }
+      }
+      window.__flights = Array.from({ length: 6 }, mkFlight)
+      function stepFlights(dt) {
+        for (const f of window.__flights) {
+          f.t += f.speed * dt
+          if (f.t >= 1) Object.assign(f, mkFlight())
+        }
+      }
+      const ease = (a, b, t) => a + (b - a) * (t * t * (3 - 2 * t))
+    </script>
+
+    <!-- Primary path: THREE.js globe. -->
+    <script type="module">
+      const fail = (msg) => { console.warn('orbit: THREE path failed —', msg); window.__startFallback && window.__startFallback() }
+      try {
+        const THREE = await import('three')
+        const canvas = document.getElementById('c')
+        const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false })
+        renderer.setSize(1280, 720, false)
+        renderer.setClearColor(0x02030a, 1)
+
+        const scene = new THREE.Scene()
+        const camera = new THREE.PerspectiveCamera(38, 1280 / 720, 0.1, 100)
+        camera.position.set(0, 0, 6)
+
+        const R = 2
+        const globe = new THREE.Group()
+        scene.add(globe)
+
+        // Dark sphere.
+        const sphere = new THREE.Mesh(
+          new THREE.SphereGeometry(R, 48, 48),
+          new THREE.MeshBasicMaterial({ color: 0x0a1428 })
+        )
+        globe.add(sphere)
+
+        // Lat/long graticule wireframe just above the surface.
+        const grat = new THREE.LineSegments(
+          new THREE.WireframeGeometry(new THREE.SphereGeometry(R * 1.002, 24, 16)),
+          new THREE.LineBasicMaterial({ color: 0x2f5a9a, transparent: true, opacity: 0.5 })
+        )
+        globe.add(grat)
+
+        // Bright limb / atmosphere via a slightly larger back-side sphere.
+        const atmo = new THREE.Mesh(
+          new THREE.SphereGeometry(R * 1.06, 48, 48),
+          new THREE.MeshBasicMaterial({ color: 0x2b6cff, transparent: true, opacity: 0.10, side: THREE.BackSide })
+        )
+        globe.add(atmo)
+
+        const llToVec = (lon, lat, rad) => {
+          const phi = (90 - lat) * Math.PI / 180
+          const theta = (lon + 180) * Math.PI / 180
+          return new THREE.Vector3(
+            -rad * Math.sin(phi) * Math.cos(theta),
+            rad * Math.cos(phi),
+            rad * Math.sin(phi) * Math.sin(theta)
+          )
+        }
+
+        // Quake markers (rebuilt as the feed updates).
+        let markers = new THREE.Group()
+        globe.add(markers)
+        const markerGeo = new THREE.SphereGeometry(1, 8, 8)
+        let lastCount = -1
+        function rebuildMarkers() {
+          const qs = window.__quakes
+          if (qs.length === lastCount) return
+          lastCount = qs.length
+          globe.remove(markers)
+          markers = new THREE.Group()
+          for (const q of qs) {
+            const mag = Math.max(0.1, q.mag)
+            const col = mag >= 5 ? 0xff5a5f : mag >= 3 ? 0xffb34d : 0x5fd0ff
+            const m = new THREE.Mesh(markerGeo, new THREE.MeshBasicMaterial({ color: col }))
+            const p = llToVec(q.lon, q.lat, R * 1.01)
+            m.position.copy(p)
+            const s = 0.018 + mag * 0.012
+            m.scale.setScalar(s)
+            m.userData.base = s
+            markers.add(m)
+          }
+          globe.add(markers)
+        }
+
+        // Flight arcs.
+        const flightDots = new THREE.Group()
+        globe.add(flightDots)
+        const dotGeo = new THREE.SphereGeometry(0.02, 6, 6)
+        const dotMat = new THREE.MeshBasicMaterial({ color: 0x9affc0 })
+        for (let i = 0; i < window.__flights.length; i++) flightDots.add(new THREE.Mesh(dotGeo, dotMat))
+
+        let last = performance.now()
+        function animate(now) {
+          const dt = Math.min(0.05, (now - last) / 1000); last = now
+          globe.rotation.y += dt * 0.12      // slow auto-rotate
+          rebuildMarkers()
+          // pulse markers
+          const t = now / 1000
+          markers.children.forEach((m, i) => {
+            const s = m.userData.base * (1 + 0.35 * (Math.sin(t * 2.5 + i) * 0.5 + 0.5))
+            m.scale.setScalar(s)
+          })
+          // move flights along eased arcs, lofted above the surface
+          stepFlights(dt)
+          window.__flights.forEach((f, i) => {
+            const lon = ease(f.lon0, f.lon1, f.t)
+            const lat = ease(f.lat0, f.lat1, f.t)
+            const loft = R * (1.05 + 0.12 * Math.sin(f.t * Math.PI))
+            flightDots.children[i].position.copy(llToVec(lon, lat, loft))
+          })
+          renderer.render(scene, camera)
+          requestAnimationFrame(animate)
+        }
+        requestAnimationFrame(animate)
+        document.getElementById('hud-sub').textContent = 'THREE.js · live globe'
+      } catch (e) {
+        fail(e && e.message ? e.message : String(e))
+      }
+    </script>
+
+    <!-- Fallback path: Canvas2D orthographic globe. Started only if THREE fails. -->
+    <script>
+      window.__startFallback = function () {
+        const three = document.getElementById('c')
+        const cv = document.getElementById('fallback')
+        if (three) three.style.display = 'none'
+        cv.style.display = 'block'
+        const ctx = cv.getContext('2d', { alpha: false })
+        const W = 1280, H = 720, CX = W / 2, CY = H / 2, R = 300
+        document.getElementById('hud-sub').textContent = 'Canvas2D fallback globe (CDN offline)'
+
+        let rot = 0, last = performance.now()
+        const project = (lon, lat) => {
+          const la = lat * Math.PI / 180
+          const lo = (lon + rot) * Math.PI / 180
+          const x = Math.cos(la) * Math.sin(lo)
+          const y = Math.sin(la)
+          const z = Math.cos(la) * Math.cos(lo)
+          return { x: CX + x * R, y: CY - y * R, vis: z > 0 }
+        }
+
+        function frame(now) {
+          const dt = Math.min(0.05, (now - last) / 1000); last = now
+          rot += dt * 10
+
+          ctx.fillStyle = '#02030a'; ctx.fillRect(0, 0, W, H)
+          // disc
+          const g = ctx.createRadialGradient(CX - 80, CY - 80, 40, CX, CY, R)
+          g.addColorStop(0, '#10223f'); g.addColorStop(1, '#070d1c')
+          ctx.fillStyle = g
+          ctx.beginPath(); ctx.arc(CX, CY, R, 0, Math.PI * 2); ctx.fill()
+          // limb
+          ctx.strokeStyle = 'rgba(60,120,220,0.6)'; ctx.lineWidth = 2
+          ctx.beginPath(); ctx.arc(CX, CY, R, 0, Math.PI * 2); ctx.stroke()
+
+          // graticule
+          ctx.strokeStyle = 'rgba(70,130,210,0.30)'; ctx.lineWidth = 1
+          for (let lat = -60; lat <= 60; lat += 30) {
+            ctx.beginPath(); let started = false
+            for (let lon = -180; lon <= 180; lon += 6) {
+              const p = project(lon, lat); if (!p.vis) { started = false; continue }
+              started ? ctx.lineTo(p.x, p.y) : (ctx.moveTo(p.x, p.y), started = true)
+            }
+            ctx.stroke()
+          }
+          for (let lon = -180; lon < 180; lon += 30) {
+            ctx.beginPath(); let started = false
+            for (let lat = -90; lat <= 90; lat += 6) {
+              const p = project(lon, lat); if (!p.vis) { started = false; continue }
+              started ? ctx.lineTo(p.x, p.y) : (ctx.moveTo(p.x, p.y), started = true)
+            }
+            ctx.stroke()
+          }
+
+          // quakes
+          const t = now / 1000
+          for (const q of window.__quakes) {
+            const p = project(q.lon, q.lat); if (!p.vis) continue
+            const mag = Math.max(0.1, q.mag)
+            const col = mag >= 5 ? '#ff5a5f' : mag >= 3 ? '#ffb34d' : '#5fd0ff'
+            const rad = 2 + mag * 1.6 + (Math.sin(t * 2.5 + q.lon) * 0.5 + 0.5) * 3
+            ctx.fillStyle = col
+            ctx.beginPath(); ctx.arc(p.x, p.y, rad, 0, Math.PI * 2); ctx.fill()
+          }
+
+          requestAnimationFrame(frame)
+        }
+        requestAnimationFrame(frame)
+      }
+    </script>
+  </body>
+</html>
