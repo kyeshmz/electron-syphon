@@ -74,7 +74,7 @@ ipcMain.handle('syphon:resolution', (_e, w: number, h: number) => output?.setRes
 ipcMain.handle('syphon:servers', () => listServers())
 ```
 
-`output.skipWhenNoClients = true` (default) means no GPU work happens until a client actually connects. **`output.setResolution(w, h)` is the biggest performance knob** — it renders (and therefore publishes) at exactly that size; combined with `deviceScaleFactor: 1` it's how you keep many windows fast. And `output.flipY = false` is ~33% faster if you pre-flip your content. Both are covered in the README's [Performance knobs](README.md#performance-knobs-resolution-and-orientation).
+`output.skipWhenNoClients = true` (default) means no GPU work happens until a client actually connects. **`output.setResolution(w, h)` is the biggest performance knob** — it renders (and therefore publishes) at exactly that size; combined with `deviceScaleFactor: 1` it's how you keep many windows fast. And `output.flipY = false` is ~33% faster if you pre-flip your content. Both are covered in the README's [Two knobs that matter](README.md#two-knobs-that-matter).
 
 ## 5. Ship it (electron-builder)
 
