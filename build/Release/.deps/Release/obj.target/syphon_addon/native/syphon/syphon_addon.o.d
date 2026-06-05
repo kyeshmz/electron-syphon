@@ -6,6 +6,7 @@ Release/obj.target/syphon_addon/native/syphon/syphon_addon.o: \
   /Users/kyeshmz/Documents/personal/electron-spout/Frameworks/Syphon.framework/Headers/SyphonMetalClient.h \
   /Users/kyeshmz/Documents/personal/electron-spout/Frameworks/Syphon.framework/Headers/SyphonClientBase.h \
   /Users/kyeshmz/Documents/personal/electron-spout/Frameworks/Syphon.framework/Headers/SyphonServerDirectory.h \
+  /Users/kyeshmz/Documents/personal/electron-spout/Frameworks/Syphon.framework/Headers/SyphonSubclassing.h \
   /Users/kyeshmz/Documents/personal/electron-spout/node_modules/.pnpm/node-addon-api@8.8.0/node_modules/node-addon-api/napi.h \
   /Users/kyeshmz/Library/Caches/node-gyp/22.21.0/include/node/node_api.h \
   /Users/kyeshmz/Library/Caches/node-gyp/22.21.0/include/node/js_native_api.h \
@@ -19,6 +20,7 @@ Release/obj.target/syphon_addon/native/syphon/syphon_addon.o: \
 /Users/kyeshmz/Documents/personal/electron-spout/Frameworks/Syphon.framework/Headers/SyphonMetalClient.h:
 /Users/kyeshmz/Documents/personal/electron-spout/Frameworks/Syphon.framework/Headers/SyphonClientBase.h:
 /Users/kyeshmz/Documents/personal/electron-spout/Frameworks/Syphon.framework/Headers/SyphonServerDirectory.h:
+/Users/kyeshmz/Documents/personal/electron-spout/Frameworks/Syphon.framework/Headers/SyphonSubclassing.h:
 /Users/kyeshmz/Documents/personal/electron-spout/node_modules/.pnpm/node-addon-api@8.8.0/node_modules/node-addon-api/napi.h:
 /Users/kyeshmz/Library/Caches/node-gyp/22.21.0/include/node/node_api.h:
 /Users/kyeshmz/Library/Caches/node-gyp/22.21.0/include/node/js_native_api.h:

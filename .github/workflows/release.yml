@@ -1,0 +1,77 @@
+name: Release
+
+# Triggered when a vX.Y.Z tag is pushed (created locally by `pnpm release`).
+# Builds the macOS/arm64 prebuild, publishes to npm with provenance, and
+# creates a matching GitHub Release with notes pulled from CHANGELOG.md.
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write # create the GitHub Release + upload the tarball
+  id-token: write # npm provenance (sigstore)
+
+jobs:
+  release:
+    # arm64 runner — Syphon.framework is arm64-only, so prebuilds are too.
+    runs-on: macos-14
+    steps:
+      - name: Checkout (full history for changelog)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build library (TypeScript + native prebuild + verify)
+        run: pnpm run make-library
+
+      - name: Sanity-check the publish contents
+        run: npm pack --dry-run
+
+      - name: Publish to npm
+        run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Extract release notes for this tag
+        id: notes
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          # Grab the CHANGELOG section for this version (between its heading and the next "## ").
+          awk -v ver="$version" '
+            $0 ~ "^## \\[?" ver "([]( ]|$)" { capture=1; next }
+            capture && /^## / { exit }
+            capture { print }
+          ' CHANGELOG.md > RELEASE_NOTES.md
+          if [ ! -s RELEASE_NOTES.md ]; then
+            echo "Release ${GITHUB_REF_NAME}" > RELEASE_NOTES.md
+          fi
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Attach the exact npm tarball so the release matches what was published.
+          tarball="$(npm pack | tail -n1)"
+          prerelease=""
+          case "${GITHUB_REF_NAME}" in *-*) prerelease="--prerelease";; esac
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "${GITHUB_REF_NAME}" \
+            --notes-file RELEASE_NOTES.md \
+            $prerelease \
+            "$tarball"
