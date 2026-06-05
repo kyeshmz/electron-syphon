@@ -1320,7 +1320,14 @@ static Napi::Value BenchmarkScaling(const Napi::CallbackInfo &info) {
       // is overwritten this pass (full update), saving a whole-surface read.
       const bool dontCare =
           opts.Has("load") && opts.Get("load").ToString().Utf8Value() == "dontcare";
-      auto buildFrame = [&](BOOL doWait) {
+      // dirtyPerFrame: redraw only this many tiles/frame (loadAction=Load keeps
+      // the rest). Measures the partial-update path the way a sparse wall hits it.
+      const uint32_t dirty =
+          opts.Has("dirtyPerFrame")
+              ? MIN(n, (uint32_t)opts.Get("dirtyPerFrame").ToNumber().Uint32Value())
+              : n;
+      uint32_t base = 0;
+      auto buildFrame = [&](BOOL doWait, uint32_t nDraw) {
         id<MTLCommandBuffer> c = [q commandBuffer];
         MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
         rp.colorAttachments[0].texture = dst;
@@ -1329,22 +1336,24 @@ static Napi::Value BenchmarkScaling(const Napi::CallbackInfo &info) {
         rp.colorAttachments[0].storeAction = MTLStoreActionStore;
         id<MTLRenderCommandEncoder> enc = [c renderCommandEncoderWithDescriptor:rp];
         [enc setRenderPipelineState:pso];
-        for (uint32_t k = 0; k < n; k++) {
+        for (uint32_t j = 0; j < nDraw; j++) {
+          uint32_t k = (base + j) % n;
           NSUInteger cx = (k % cols) * tileW, cy = (k / cols) * tileH;
           [enc setViewport:(MTLViewport){(double)cx,(double)cy,(double)tileW,(double)tileH,0,1}];
           [enc setFragmentTexture:texs[k] atIndex:0];
           [enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
         }
+        base = (base + nDraw) % n;
         [enc endEncoding];
         [c addCompletedHandler:^(id<MTLCommandBuffer> _Nonnull) { [wsrv publish]; }];
         [c commit];
         if (doWait) [c waitUntilCompleted];
         else [flight addObject:c];
       };
-      buildFrame(YES);
+      buildFrame(YES, n);
       double t0 = NowMs();
       for (uint32_t i = 0; i < iterations; i++) {
-        buildFrame(wait ? YES : NO);
+        buildFrame(wait ? YES : NO, dirty);
         if (!wait) {
           while (flight.count > 0 &&
                  (flight[0].status == MTLCommandBufferStatusCompleted ||
