@@ -714,13 +714,42 @@ private:
   Napi::Value GetHasNewFrame(const Napi::CallbackInfo &info);
   void Dispose(const Napi::CallbackInfo &info);
 
+  bool EnsureRgbaPipeline();
+
   id<MTLDevice> device_ = nil;
   id<MTLCommandQueue> queue_ = nil;
   SyphonMetalClient *client_ = nil;
-  // Reused full-frame readback target for receiveFrame() (anti-leak).
+  // Reused full-frame readback target for receiveFrame() (anti-leak). RGBA8 so
+  // the GPU does the BGRA→RGBA swizzle during the copy (no per-pixel CPU loop).
   id<MTLTexture> readTex_ = nil;
   NSUInteger readW_ = 0, readH_ = 0;
+  id<MTLRenderPipelineState> rgbaPso_ = nil; // BGRA-sample → RGBA-write + opaque α
 };
+
+// Compile (once) a pipeline that samples the received BGRA frame and writes it
+// to an RGBA8 target with opaque alpha. Metal's format conversion does the
+// channel swap during the sample, so getBytes returns RGBA with no CPU swizzle.
+bool SyphonClient::EnsureRgbaPipeline() {
+  if (rgbaPso_) return true;
+  NSError *err = nil;
+  NSString *msl =
+      @"#include <metal_stdlib>\n using namespace metal;\n"
+      @"struct VOut { float4 pos [[position]]; float2 uv; };\n"
+      @"vertex VOut vmain(uint vid [[vertex_id]]) {\n"
+      @"  float2 p[4] = { float2(-1,-1), float2(1,-1), float2(-1,1), float2(1,1) };\n"
+      @"  float2 uv[4] = { float2(0,1), float2(1,1), float2(0,0), float2(1,0) };\n" // top-down, no flip
+      @"  VOut o; o.pos = float4(p[vid],0,1); o.uv = uv[vid]; return o; }\n"
+      @"fragment float4 fmain(VOut in [[stage_in]], texture2d<float> t [[texture(0)]]) {\n"
+      @"  constexpr sampler s(filter::nearest); return float4(t.sample(s, in.uv).rgb, 1.0); }\n";
+  id<MTLLibrary> lib = [device_ newLibraryWithSource:msl options:nil error:&err];
+  if (!lib) return false;
+  MTLRenderPipelineDescriptor *pd = [[MTLRenderPipelineDescriptor alloc] init];
+  pd.vertexFunction = [lib newFunctionWithName:@"vmain"];
+  pd.fragmentFunction = [lib newFunctionWithName:@"fmain"];
+  pd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+  rgbaPso_ = [device_ newRenderPipelineStateWithDescriptor:pd error:&err];
+  return rgbaPso_ != nil;
+}
 
 SyphonClient::SyphonClient(const Napi::CallbackInfo &info)
     : Napi::ObjectWrap<SyphonClient>(info) {
@@ -752,6 +781,7 @@ SyphonClient::~SyphonClient() {
     client_ = nil;
   }
   readTex_ = nil;
+  rgbaPso_ = nil;
   queue_ = nil;
   device_ = nil;
 }
@@ -762,6 +792,7 @@ void SyphonClient::Dispose(const Napi::CallbackInfo &info) {
     client_ = nil;
   }
   readTex_ = nil;
+  rgbaPso_ = nil;
 }
 
 // Receive(sample?: boolean) →
@@ -858,49 +889,42 @@ Napi::Value SyphonClient::ReceiveFrame(const Napi::CallbackInfo &info) {
     out.Set("height", Napi::Number::New(env, h));
     if (w == 0 || h == 0) return out;
 
-    // Reuse one Shared BGRA texture sized to the frame (anti-leak).
+    // Reuse one Shared RGBA8 render target sized to the frame (anti-leak). The
+    // GPU samples the BGRA source and writes RGBA + opaque alpha, so getBytes
+    // returns RGBA directly — no per-pixel CPU swizzle loop.
     if (!readTex_ || readW_ != w || readH_ != h) {
       MTLTextureDescriptor *d = [MTLTextureDescriptor
-          texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+          texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
                                        width:w
                                       height:h
                                    mipmapped:NO];
+      d.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
       d.storageMode = MTLStorageModeShared;
       readTex_ = [device_ newTextureWithDescriptor:d];
       readW_ = w;
       readH_ = h;
     }
-    if (!readTex_) return out;
+    if (!readTex_ || !EnsureRgbaPipeline()) return out;
 
     id<MTLCommandBuffer> cb = [queue_ commandBuffer];
-    id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
-    [blit copyFromTexture:tex
-              sourceSlice:0
-              sourceLevel:0
-             sourceOrigin:MTLOriginMake(0, 0, 0)
-               sourceSize:MTLSizeMake(w, h, 1)
-                toTexture:readTex_
-         destinationSlice:0
-         destinationLevel:0
-        destinationOrigin:MTLOriginMake(0, 0, 0)];
-    [blit endEncoding];
+    MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+    rp.colorAttachments[0].texture = readTex_;
+    rp.colorAttachments[0].loadAction = MTLLoadActionDontCare; // fully overwritten
+    rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+    id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
+    [enc setRenderPipelineState:rgbaPso_];
+    [enc setFragmentTexture:tex atIndex:0];
+    [enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+    [enc endEncoding];
     [cb commit];
     [cb waitUntilCompleted];
 
     const size_t n = (size_t)w * h * 4;
     Napi::Buffer<uint8_t> buf = Napi::Buffer<uint8_t>::New(env, n);
-    uint8_t *dst = buf.Data();
-    [readTex_ getBytes:dst
+    [readTex_ getBytes:buf.Data()
            bytesPerRow:w * 4
             fromRegion:MTLRegionMake2D(0, 0, w, h)
            mipmapLevel:0];
-    // BGRA (Metal) → RGBA (canvas ImageData); force opaque alpha.
-    for (size_t i = 0; i < n; i += 4) {
-      uint8_t b = dst[i];
-      dst[i] = dst[i + 2];
-      dst[i + 2] = b;
-      dst[i + 3] = 255;
-    }
     out.Set("pixels", buf);
     return out;
   }
