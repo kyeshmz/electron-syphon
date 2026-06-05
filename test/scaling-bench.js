@@ -14,6 +14,21 @@ function run() {
     }
     console.log(`\t\t→ atlas ${(res.multi.avgMs/res.atlas.avgMs).toFixed(2)}x faster than multi; composite(ceiling) ${(res.multi.avgMs/res.composite.avgMs).toFixed(2)}x\n`)
   }
+
+  // Partial-update win: the persistent atlas re-blits only the tiles that
+  // changed this frame (CompositeSyphonOutput only sends dirty slots). On a wall
+  // where few windows repaint per frame this is the dominant lever.
+  console.log(`Partial-update atlas — only N of the grid's tiles change per frame (async, flip)`)
+  console.log('outputs\tdirty\tframeMs\tfps\tvs all-dirty')
+  for (const [cols, rows] of [[4,4],[5,5]]) {
+    const n = cols * rows
+    const all = addon.benchmarkScaling({ width: tileW, height: tileH, cols, rows, iterations: 400, mode: 'atlas', wait: false, flip: true, dirtyPerFrame: n })
+    for (const dirty of [n, Math.ceil(n/2), 4, 1]) {
+      const r = addon.benchmarkScaling({ width: tileW, height: tileH, cols, rows, iterations: 400, mode: 'atlas', wait: false, flip: true, dirtyPerFrame: dirty })
+      console.log(`${n}\t${dirty}\t${r.avgMs.toFixed(3)}\t${r.fps.toFixed(0)}\t${(all.avgMs/r.avgMs).toFixed(2)}x`)
+    }
+    console.log('')
+  }
 }
 if (process.versions.electron) {
   const {app}=require('electron'); app.disableHardwareAcceleration()

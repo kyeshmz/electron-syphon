@@ -23,22 +23,11 @@ export interface CompositeOptions {
   flipY?: boolean
 }
 
-// Refcounted wrapper around an Electron shared texture. The atlas blit COPIES
-// each source into the atlas, so a source texture is safe to release once it is
-// (a) no longer the current frame for its slot AND (b) not used by any in-flight
-// publish. We track both with a single refcount: +1 for "current", +1 per
-// in-flight publish batch that referenced it.
-class RefTexture {
-  refs = 0
-  constructor(readonly texture: Electron.OffscreenSharedTexture) {}
-  retain(): this {
-    this.refs++
-    return this
-  }
-  release(): void {
-    if (--this.refs <= 0) this.texture.release()
-  }
-}
+// The atlas blit COPIES each source into a PERSISTENT atlas texture, so once a
+// publish that blitted a source completes, the pixels live in the atlas and the
+// source can be released — the atlas itself provides "sticky" tiles. A source
+// texture therefore only needs to survive until the one publish that blits it
+// finishes, so a plain FIFO of in-flight batches suffices (no refcount needed).
 
 /**
  * Publish N offscreen Electron windows through a SINGLE Syphon server by
@@ -75,12 +64,14 @@ export class CompositeSyphonOutput {
   frames = 0
   lastFrameAt = 0
 
-  // Latest (sticky) frame per slot — held with one "current" ref so an unchanged
-  // tile keeps showing its last frame across publishes.
-  private readonly current: (RefTexture | null)[]
-  // FIFO of in-flight publish batches; batch[i] is the set of textures the i-th
-  // submitted atlas referenced, released once reap() reports it completed.
-  private pending: RefTexture[][] = []
+  // Latest UN-BLITTED frame per slot ("dirty"). Once blitted into the atlas the
+  // slot goes back to null — the atlas holds the pixels, so we don't keep the
+  // source texture around. A new paint before the next publish supersedes (and
+  // releases) the previous un-blitted one.
+  private readonly dirty: (Electron.OffscreenSharedTexture | null)[]
+  // FIFO of in-flight publish batches; batch[i] is the set of source textures
+  // the i-th submitted atlas blitted, released once reap() reports it completed.
+  private pending: Electron.OffscreenSharedTexture[][] = []
   // Per-slot attached webContents + paint handler, for clean detach.
   private readonly attached: (WebContents | null)[]
   private readonly handlers: ((...args: never[]) => void)[]
@@ -97,7 +88,7 @@ export class CompositeSyphonOutput {
     this.tileHeight = Math.max(1, Math.floor(opts.tileHeight ?? 720))
     this.flipY = opts.flipY ?? true
     const n = this.cols * this.rows
-    this.current = new Array(n).fill(null)
+    this.dirty = new Array(n).fill(null)
     this.attached = new Array(n).fill(null)
     this.handlers = new Array(n)
   }
@@ -150,10 +141,10 @@ export class CompositeSyphonOutput {
     const wc = this.attached[idx]
     if (wc && !wc.isDestroyed()) wc.removeListener('paint', this.handlers[idx] as never)
     this.attached[idx] = null
-    const cur = this.current[idx]
+    const cur = this.dirty[idx]
     if (cur) {
-      this.current[idx] = null
-      cur.release() // drop the "current" ref; in-flight batches keep it alive
+      this.dirty[idx] = null
+      cur.release() // an un-blitted frame that will never be published
     }
   }
 
@@ -173,10 +164,10 @@ export class CompositeSyphonOutput {
       texture.release()
       return
     }
-    // Replace this slot's sticky frame with the new one.
-    const next = new RefTexture(texture).retain() // "current" ref
-    const prev = this.current[idx]
-    this.current[idx] = next
+    // Mark this slot dirty with the new frame; drop any earlier un-blitted one
+    // (it was never published, the atlas never saw it).
+    const prev = this.dirty[idx]
+    this.dirty[idx] = texture
     if (prev) prev.release()
 
     this.publish()
@@ -191,17 +182,26 @@ export class CompositeSyphonOutput {
     if (!this.enabled) return
     if (this.skipWhenNoClients && !this.server.hasClients) return
 
+    // Only re-blit slots whose source repainted since the last publish; the
+    // persistent atlas keeps every other tile's last pixels. This is the 2.5–3×
+    // win on a wall where few windows change per frame.
     const tiles: { handle: Buffer; x: number; y: number; w: number; h: number }[] = []
-    const batch: RefTexture[] = []
+    const batch: Electron.OffscreenSharedTexture[] = []
     for (let row = 0; row < this.rows; row++) {
       for (let col = 0; col < this.cols; col++) {
-        const cur = this.current[row * this.cols + col]
-        if (!cur) continue
-        const info = cur.texture.textureInfo
+        const idx = row * this.cols + col
+        const tex = this.dirty[idx]
+        if (!tex) continue
+        const info = tex.textureInfo
         const handle: Buffer | undefined =
           (info as { sharedTextureHandle?: Buffer }).sharedTextureHandle ??
           (info as { handle?: { ioSurface?: Buffer } }).handle?.ioSurface
-        if (!handle) continue
+        if (!handle) {
+          // Unusable frame — drop it so it can't wedge the slot dirty forever.
+          this.dirty[idx] = null
+          tex.release()
+          continue
+        }
         tiles.push({
           handle,
           x: col * this.tileWidth,
@@ -209,10 +209,11 @@ export class CompositeSyphonOutput {
           w: this.tileWidth,
           h: this.tileHeight
         })
-        batch.push(cur.retain()) // +1 in-flight ref
+        this.dirty[idx] = null // consumed: the atlas will hold its pixels
+        batch.push(tex) // kept alive until this publish completes
       }
     }
-    if (tiles.length === 0) return
+    if (tiles.length === 0) return // nothing changed → atlas already shows it
 
     const enqueued = this.server.publishAtlas(tiles, this.atlasWidth, this.atlasHeight, this.flipY)
     if (enqueued) {
@@ -220,7 +221,7 @@ export class CompositeSyphonOutput {
       this.frames++
       this.lastFrameAt = Date.now()
     } else {
-      for (const t of batch) t.release() // not enqueued → drop the in-flight refs
+      for (const t of batch) t.release() // not enqueued → release immediately
     }
 
     let done = this.server.reap()
@@ -238,6 +239,24 @@ export class CompositeSyphonOutput {
       /* server may already be disposed */
     }
     while (this.pending.length) {
+      for (const t of this.pending.shift()!) t.release()
+    }
+  }
+
+  /** Force a republish of the current atlas without waiting for a source to
+   *  repaint (e.g. to feed a client that just connected to a static wall).
+   *  No-op until at least one tile has been published. */
+  republish(): void {
+    if (!this.enabled) return
+    if (this.skipWhenNoClients && !this.server.hasClients) return
+    if (this.dirty.some((d) => d)) {
+      this.publish()
+      return
+    }
+    // 0 dirty tiles: re-emit the persisted atlas (native publishes it as-is).
+    this.server.publishAtlas([], this.atlasWidth, this.atlasHeight, this.flipY)
+    let done = this.server.reap()
+    while (done-- > 0 && this.pending.length) {
       for (const t of this.pending.shift()!) t.release()
     }
   }
@@ -261,7 +280,7 @@ export class CompositeSyphonOutput {
   }
 
   dispose(): void {
-    for (let i = 0; i < this.current.length; i++) this.detachSlot(i)
+    for (let i = 0; i < this.dirty.length; i++) this.detachSlot(i)
     this.flushPending()
     this.server.dispose()
   }

@@ -111,6 +111,7 @@ private:
   // surfaceTextures_, because atlas tiles can differ in size.
   id<MTLTexture> atlas_ = nil;
   NSUInteger atlasW_ = 0, atlasH_ = 0;
+  BOOL atlasFilled_ = NO; // has the atlas been written at least once since alloc?
   NSMutableDictionary<NSNumber *, id<MTLTexture>> *atlasSrcTextures_ = nil;
 
   Napi::Value PublishAtlas(const Napi::CallbackInfo &info);
@@ -177,6 +178,7 @@ void SyphonServer::Dispose(const Napi::CallbackInfo &info) {
     [atlasSrcTextures_ removeAllObjects];
     atlas_ = nil;
     atlasW_ = atlasH_ = 0;
+    atlasFilled_ = NO;
     cpuW_ = cpuH_ = surfW_ = surfH_ = 0;
   }
 }
@@ -312,7 +314,9 @@ Napi::Value SyphonServer::PublishAtlas(const Napi::CallbackInfo &info) {
   const NSUInteger ah = info[2].As<Napi::Number>().Uint32Value();
   const BOOL flipped = info[3].As<Napi::Boolean>().Value() ? YES : NO;
   const uint32_t count = tiles.Length();
-  if (aw == 0 || ah == 0 || count == 0) return Napi::Number::New(env, 0);
+  // count == 0 is allowed: it republishes the persisted atlas as-is (used to
+  // feed a newly-connected client on a static wall).
+  if (aw == 0 || ah == 0) return Napi::Number::New(env, 0);
 
   @autoreleasepool {
     // (Re)allocate the persistent private atlas if the size changed.
@@ -327,6 +331,7 @@ Napi::Value SyphonServer::PublishAtlas(const Napi::CallbackInfo &info) {
       atlas_ = [device_ newTextureWithDescriptor:ad];
       atlasW_ = aw;
       atlasH_ = ah;
+      atlasFilled_ = NO; // fresh atlas has undefined contents until first blit
     }
     if (!atlas_) return Napi::Number::New(env, 0);
 
@@ -371,8 +376,11 @@ Napi::Value SyphonServer::PublishAtlas(const Napi::CallbackInfo &info) {
       blitted++;
     }
     [blit endEncoding];
-    if (blitted == 0) {
-      // Nothing valid — don't publish a (possibly stale/garbage) atlas.
+    if (blitted > 0) atlasFilled_ = YES;
+    // With a persistent atlas, a dirty-only publish (or even 0 dirty tiles) is
+    // valid AS LONG AS the atlas already holds real pixels — unchanged tiles
+    // keep their last contents. Only bail if it was never filled (garbage).
+    if (!atlasFilled_) {
       [cmd commit];
       return Napi::Number::New(env, 0);
     }
@@ -1002,19 +1010,32 @@ static Napi::Value BenchmarkScaling(const Napi::CallbackInfo &info) {
                                       height:ah
                                    mipmapped:NO];
       ad.usage = MTLTextureUsageShaderRead;
-      ad.storageMode = MTLStorageModePrivate; // GPU-only atlas, blit dst + Syphon src
+      std::string atlasStore = opts.Has("atlasStorage")
+                                   ? opts.Get("atlasStorage").ToString().Utf8Value()
+                                   : "private";
+      ad.storageMode = atlasStore == "shared" ? MTLStorageModeShared
+                                              : MTLStorageModePrivate;
       id<MTLTexture> atlas = [dev newTextureWithDescriptor:ad];
       id<MTLCommandQueue> q = [dev newCommandQueue];
       SyphonMetalServer *srv =
           [[SyphonMetalServer alloc] initWithName:@"scaling-atlas"
                                            device:dev
                                           options:nil];
+      // dirtyPerFrame: how many tiles change (re-blit) per published frame. The
+      // persistent atlas keeps unchanged tiles, so a wall where only a few
+      // windows repaint costs only those blits + one publish. Default = all.
+      const uint32_t dirty =
+          opts.Has("dirtyPerFrame")
+              ? MIN(n, (uint32_t)opts.Get("dirtyPerFrame").ToNumber().Uint32Value())
+              : n;
       NSRect region = NSMakeRect(0, 0, aw, ah);
       NSMutableArray<id<MTLCommandBuffer>> *flight = [NSMutableArray array];
-      auto buildFrame = [&](BOOL doWait) {
+      uint32_t base = 0;
+      auto buildFrame = [&](BOOL doWait, uint32_t nBlit) {
         id<MTLCommandBuffer> c = [q commandBuffer];
         id<MTLBlitCommandEncoder> blit = [c blitCommandEncoder];
-        for (uint32_t k = 0; k < n; k++) {
+        for (uint32_t j = 0; j < nBlit; j++) {
+          uint32_t k = (base + j) % n; // rotate which tiles are "dirty"
           NSUInteger cx = (k % cols) * tileW, cy = (k / cols) * tileH;
           [blit copyFromTexture:texs[k]
                     sourceSlice:0 sourceLevel:0
@@ -1024,16 +1045,17 @@ static Napi::Value BenchmarkScaling(const Napi::CallbackInfo &info) {
                destinationSlice:0 destinationLevel:0
               destinationOrigin:MTLOriginMake(cx, cy, 0)];
         }
+        base = (base + nBlit) % n;
         [blit endEncoding];
         [srv publishFrameTexture:atlas onCommandBuffer:c imageRegion:region flipped:flipped];
         [c commit];
         if (doWait) [c waitUntilCompleted];
         else [flight addObject:c];
       };
-      buildFrame(YES); // warm up
+      buildFrame(YES, n); // warm up: fill the whole atlas once
       double t0 = NowMs();
       for (uint32_t i = 0; i < iterations; i++) {
-        buildFrame(wait ? YES : NO);
+        buildFrame(wait ? YES : NO, dirty);
         if (!wait) {
           while (flight.count > 0 &&
                  (flight[0].status == MTLCommandBufferStatusCompleted ||

@@ -83,7 +83,17 @@ Measured (`npm run bench:scaling`, 1280×720 tiles, async) — time per *full-gr
 | 16 | 1.63 ms | 0.66 ms | **2.5×** |
 | 25 | 5.96 ms | 0.99 ms | **6.0×** |
 
-The per-server pattern's cost per tile grows and falls off a cliff (~0.24 ms/tile at 25 outputs — can no longer sustain the grid); the atlas stays flat (~0.04 ms/tile). Sources should render at `tileWidth × tileHeight` (larger frames are cropped to the tile).
+The per-server pattern's cost per tile grows and falls off a cliff (~0.2 ms/tile at 25 outputs — can no longer sustain the grid); the atlas stays flat (~0.04 ms/tile). Sources should render at `tileWidth × tileHeight` (larger frames are cropped to the tile).
+
+`CompositeSyphonOutput` re-blits **only the tiles that changed** since the last frame — the atlas texture is persistent, so unchanged windows keep their last pixels for free. On a wall where few windows repaint per frame this is the dominant lever:
+
+| of 25 tiles, changed/frame | frame time | vs all-change |
+|---|---:|---:|
+| 25 (all) | 0.98 ms | 1.0× |
+| 4  | 0.50 ms | 2.0× |
+| 1  | 0.40 ms | 2.5× |
+
+Combined with the atlas (vs one server per window, all repainting), a sparsely-updating 25-window wall publishes ~11× faster. Call `republish()` to re-emit the current atlas to a client that connects to an otherwise-static wall.
 
 `examples/full-demo/` shows every capture method side by side with live controls.
 
