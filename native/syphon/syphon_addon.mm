@@ -33,6 +33,16 @@
 #import <Syphon/SyphonMetalServer.h>
 #import <Syphon/SyphonMetalClient.h>
 #import <Syphon/SyphonServerDirectory.h>
+#import <Syphon/SyphonServerBase.h>
+#import <Syphon/SyphonSubclassing.h>
+
+// A minimal SyphonServerBase subclass that lets us draw directly into the
+// server's published IOSurface (via the SyphonSubclassing category) and advertise
+// it with -publish — skipping SyphonMetalServer's internal copy of our texture.
+@interface DirectSyphonServer : SyphonServerBase
+@end
+@implementation DirectSyphonServer
+@end
 
 #include <napi.h>
 #include <chrono>
@@ -911,6 +921,173 @@ Napi::Object SyphonClient::Init(Napi::Env env, Napi::Object exports) {
   return exports;
 }
 
+static id<MTLTexture> WrapSurface(id<MTLDevice> dev, IOSurfaceRef s,
+                                  NSUInteger w, NSUInteger h); // defined below
+
+// ---------------------------------------------------------------------------
+//  DirectServer — EXPERIMENTAL zero-copy composite. Blits source tiles straight
+//  into the Syphon server's own published IOSurface (SyphonSubclassing) and
+//  calls -publish, skipping SyphonMetalServer's internal copy. Measured ~1.3-1.4x
+//  over the atlas path. Gated on correctness (tearing/orientation) before it can
+//  back a production CompositeSyphonOutput path. No flip: a blit can't mirror, so
+//  this is flipY=false semantics (sources must be pre-oriented).
+// ---------------------------------------------------------------------------
+class DirectServer : public Napi::ObjectWrap<DirectServer> {
+public:
+  static Napi::Object Init(Napi::Env env, Napi::Object exports);
+  DirectServer(const Napi::CallbackInfo &info);
+  ~DirectServer();
+
+private:
+  Napi::Value PublishTiles(const Napi::CallbackInfo &info);
+  Napi::Value GetHasClients(const Napi::CallbackInfo &info);
+  void Dispose(const Napi::CallbackInfo &info);
+  id<MTLTexture> SourceTexture(IOSurfaceRef s);
+
+  id<MTLDevice> device_ = nil;
+  id<MTLCommandQueue> queue_ = nil;
+  DirectSyphonServer *server_ = nil;
+  IOSurfaceRef pub_ = nullptr;     // the server's published surface
+  id<MTLTexture> pubTex_ = nil;    // pub_ wrapped for blitting
+  NSUInteger pubW_ = 0, pubH_ = 0;
+  NSMutableDictionary<NSNumber *, id<MTLTexture>> *srcTex_ = nil;
+  NSMutableArray<id<MTLCommandBuffer>> *inflight_ = nil;
+};
+
+DirectServer::DirectServer(const Napi::CallbackInfo &info)
+    : Napi::ObjectWrap<DirectServer>(info) {
+  Napi::Env env = info.Env();
+  std::string name = info[0].As<Napi::String>().Utf8Value();
+  @autoreleasepool {
+    device_ = MTLCreateSystemDefaultDevice();
+    queue_ = [device_ newCommandQueue];
+    srcTex_ = [NSMutableDictionary dictionary];
+    inflight_ = [NSMutableArray array];
+    server_ = [[DirectSyphonServer alloc]
+        initWithName:[NSString stringWithUTF8String:name.c_str()]
+             options:nil];
+    if (!server_)
+      Napi::Error::New(env, "DirectSyphonServer init failed")
+          .ThrowAsJavaScriptException();
+  }
+}
+
+DirectServer::~DirectServer() {
+  if (server_) [server_ stop];
+  if (pub_) CFRelease(pub_);
+  pub_ = nullptr;
+  pubTex_ = nil;
+  srcTex_ = nil;
+  inflight_ = nil;
+  server_ = nil;
+  queue_ = nil;
+  device_ = nil;
+}
+
+void DirectServer::Dispose(const Napi::CallbackInfo &info) {
+  @autoreleasepool {
+    for (id<MTLCommandBuffer> c in inflight_) [c waitUntilCompleted];
+    [inflight_ removeAllObjects];
+    if (server_) { [server_ stop]; server_ = nil; }
+    if (pub_) { CFRelease(pub_); pub_ = nullptr; }
+    pubTex_ = nil;
+    [srcTex_ removeAllObjects];
+    pubW_ = pubH_ = 0;
+  }
+}
+
+id<MTLTexture> DirectServer::SourceTexture(IOSurfaceRef s) {
+  NSNumber *key = @((uintptr_t)s);
+  id<MTLTexture> t = srcTex_[key];
+  if (t) return t;
+  const NSUInteger w = IOSurfaceGetWidth(s), h = IOSurfaceGetHeight(s);
+  if (w == 0 || h == 0) return nil;
+  t = WrapSurface(device_, s, w, h);
+  if (t) {
+    if (srcTex_.count > 512) [srcTex_ removeAllObjects];
+    srcTex_[key] = t;
+  }
+  return t;
+}
+
+// publishTiles(tiles, w, h) → blit tiles into the server's surface, publish.
+Napi::Value DirectServer::PublishTiles(const Napi::CallbackInfo &info) {
+  Napi::Env env = info.Env();
+  if (!server_) return Napi::Number::New(env, 0);
+  Napi::Array tiles = info[0].As<Napi::Array>();
+  const NSUInteger w = info[1].As<Napi::Number>().Uint32Value();
+  const NSUInteger h = info[2].As<Napi::Number>().Uint32Value();
+  if (w == 0 || h == 0) return Napi::Number::New(env, 0);
+
+  @autoreleasepool {
+    if (!pub_ || pubW_ != w || pubH_ != h) {
+      if (pub_) CFRelease(pub_);
+      pub_ = [server_ newSurfaceForWidth:w height:h options:nil]; // returns +1
+      if (!pub_) return Napi::Number::New(env, 0);
+      pubTex_ = WrapSurface(device_, pub_, w, h);
+      pubW_ = w; pubH_ = h;
+    }
+    if (!pubTex_) return Napi::Number::New(env, 0);
+
+    id<MTLCommandBuffer> cmd = [queue_ commandBuffer];
+    id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
+    uint32_t count = tiles.Length(), blitted = 0;
+    for (uint32_t i = 0; i < count; i++) {
+      Napi::Value tv = tiles[i];
+      if (!tv.IsObject()) continue;
+      Napi::Object tile = tv.As<Napi::Object>();
+      Napi::Value hv = tile.Get("handle");
+      if (!hv.IsBuffer()) continue;
+      Napi::Buffer<uint8_t> handle = hv.As<Napi::Buffer<uint8_t>>();
+      if (handle.Length() < sizeof(void *)) continue;
+      IOSurfaceRef s = *reinterpret_cast<IOSurfaceRef *>(handle.Data());
+      if (!s) continue;
+      id<MTLTexture> src = SourceTexture(s);
+      if (!src) continue;
+      NSUInteger dx = tile.Has("x") ? tile.Get("x").ToNumber().Uint32Value() : 0;
+      NSUInteger dy = tile.Has("y") ? tile.Get("y").ToNumber().Uint32Value() : 0;
+      NSUInteger cw = MIN(src.width, w - MIN(dx, w));
+      NSUInteger ch = MIN(src.height, h - MIN(dy, h));
+      if (cw == 0 || ch == 0) continue;
+      [blit copyFromTexture:src
+                sourceSlice:0 sourceLevel:0
+               sourceOrigin:MTLOriginMake(0, 0, 0)
+                 sourceSize:MTLSizeMake(cw, ch, 1)
+                  toTexture:pubTex_
+           destinationSlice:0 destinationLevel:0
+          destinationOrigin:MTLOriginMake(dx, dy, 0)];
+      blitted++;
+    }
+    [blit endEncoding];
+    if (blitted == 0) { [cmd commit]; return Napi::Number::New(env, 0); }
+    __weak DirectSyphonServer *wsrv = server_;
+    [cmd addCompletedHandler:^(id<MTLCommandBuffer> _Nonnull) { [wsrv publish]; }];
+    [cmd commit];
+    [inflight_ addObject:cmd];
+    while (inflight_.count > 0 &&
+           (inflight_[0].status == MTLCommandBufferStatusCompleted ||
+            inflight_[0].status == MTLCommandBufferStatusError))
+      [inflight_ removeObjectAtIndex:0];
+  }
+  return Napi::Number::New(env, 1);
+}
+
+Napi::Value DirectServer::GetHasClients(const Napi::CallbackInfo &info) {
+  return Napi::Boolean::New(info.Env(), server_ ? server_.hasClients : false);
+}
+
+Napi::Object DirectServer::Init(Napi::Env env, Napi::Object exports) {
+  Napi::Function func = DefineClass(
+      env, "DirectServer",
+      {
+          InstanceMethod("publishTiles", &DirectServer::PublishTiles),
+          InstanceMethod("dispose", &DirectServer::Dispose),
+          InstanceAccessor("hasClients", &DirectServer::GetHasClients, nullptr),
+      });
+  exports.Set("DirectServer", func);
+  return exports;
+}
+
 static Napi::Value ListServers(const Napi::CallbackInfo &info) {
   Napi::Env env = info.Env();
   Napi::Array out = Napi::Array::New(env);
@@ -1002,7 +1179,69 @@ static Napi::Value BenchmarkScaling(const Napi::CallbackInfo &info) {
 
   double total = 0.0;
   @autoreleasepool {
-    if (mode == "composite") {
+    if (mode == "direct") {
+      // ZERO-COPY composite: blit the N source tiles DIRECTLY into the server's
+      // own published IOSurface (via SyphonSubclassing) and call -publish. Skips
+      // SyphonMetalServer's internal copy of our atlas — one full blit instead of
+      // two. Async: -publish fires in the command-buffer completion handler so
+      // clients only see the surface after the GPU finishes writing it.
+      const NSUInteger aw = tileW * cols, ah = tileH * rows;
+      std::vector<IOSurfaceRef> surfs(n, nullptr);
+      std::vector<id<MTLTexture>> texs(n, nil);
+      for (uint32_t k = 0; k < n; k++) {
+        surfs[k] = MakeFilledSurface(tileW, tileH);
+        texs[k] = WrapSurface(dev, surfs[k], tileW, tileH);
+      }
+      id<MTLCommandQueue> q = [dev newCommandQueue];
+      DirectSyphonServer *srv =
+          [[DirectSyphonServer alloc] initWithName:@"scaling-direct" options:nil];
+      IOSurfaceRef pub = [srv newSurfaceForWidth:aw height:ah options:nil];
+      if (!pub) {
+        Napi::Error::New(env, "newSurfaceForWidth failed (SyphonSubclassing)")
+            .ThrowAsJavaScriptException();
+        return env.Null();
+      }
+      id<MTLTexture> dst = WrapSurface(dev, pub, aw, ah);
+      __weak DirectSyphonServer *wsrv = srv;
+      NSMutableArray<id<MTLCommandBuffer>> *flight = [NSMutableArray array];
+      auto buildFrame = [&](BOOL doWait) {
+        id<MTLCommandBuffer> c = [q commandBuffer];
+        id<MTLBlitCommandEncoder> blit = [c blitCommandEncoder];
+        for (uint32_t k = 0; k < n; k++) {
+          NSUInteger cx = (k % cols) * tileW, cy = (k / cols) * tileH;
+          [blit copyFromTexture:texs[k]
+                    sourceSlice:0 sourceLevel:0
+                   sourceOrigin:MTLOriginMake(0, 0, 0)
+                     sourceSize:MTLSizeMake(tileW, tileH, 1)
+                      toTexture:dst
+               destinationSlice:0 destinationLevel:0
+              destinationOrigin:MTLOriginMake(cx, cy, 0)];
+        }
+        [blit endEncoding];
+        [c addCompletedHandler:^(id<MTLCommandBuffer> _Nonnull) {
+          [wsrv publish];
+        }];
+        [c commit];
+        if (doWait) [c waitUntilCompleted];
+        else [flight addObject:c];
+      };
+      buildFrame(YES); // warm up
+      double t0 = NowMs();
+      for (uint32_t i = 0; i < iterations; i++) {
+        buildFrame(wait ? YES : NO);
+        if (!wait) {
+          while (flight.count > 0 &&
+                 (flight[0].status == MTLCommandBufferStatusCompleted ||
+                  flight[0].status == MTLCommandBufferStatusError))
+            [flight removeObjectAtIndex:0];
+        }
+      }
+      for (id<MTLCommandBuffer> c in flight) [c waitUntilCompleted];
+      total = NowMs() - t0;
+      [srv stop];
+      CFRelease(pub);
+      for (uint32_t k = 0; k < n; k++) if (surfs[k]) CFRelease(surfs[k]);
+    } else if (mode == "composite") {
       const NSUInteger w = tileW * cols, h = tileH * rows;
       IOSurfaceRef surf = MakeFilledSurface(w, h);
       id<MTLTexture> tex = WrapSurface(dev, surf, w, h);
@@ -1246,6 +1485,7 @@ static Napi::Value MakeTestSurface(const Napi::CallbackInfo &info) {
 static Napi::Object InitAll(Napi::Env env, Napi::Object exports) {
   SyphonServer::Init(env, exports);
   SyphonClient::Init(env, exports);
+  DirectServer::Init(env, exports);
   exports.Set("listServers", Napi::Function::New(env, ListServers));
   exports.Set("benchmarkScaling", Napi::Function::New(env, BenchmarkScaling));
   exports.Set("__makeTestSurface", Napi::Function::New(env, MakeTestSurface));
