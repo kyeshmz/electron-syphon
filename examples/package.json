@@ -10,6 +10,7 @@
     "webgl": "npm run build && electron dist/webgl/main.js",
     "webgpu": "npm run build && electron dist/webgpu/main.js",
     "multi-window": "npm run build && electron dist/multi-window/main.js",
+    "composite-wall": "npm run build && electron dist/composite-wall/main.js",
     "frame-test": "npm run build && electron dist/frame-test/main.js",
     "single-render": "npm run build && electron dist/single-render/main.js",
     "planetary-room": "npm run build && electron dist/planetary-room/main.js",

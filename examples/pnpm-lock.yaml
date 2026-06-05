@@ -52,6 +52,7 @@ packages:
   electron-syphon@file:..:
     resolution: {directory: .., type: directory}
     engines: {node: '>=18'}
+    cpu: [arm64]
     os: [darwin]
     peerDependencies:
       electron: '>=33'
@@ -62,6 +63,7 @@ packages:
   electron@42.3.2:
     resolution: {integrity: sha512-R8qL6TMQ+u5r/l1mL6zWqqK3eQo6Bqi4ScmysgODcy+SNR76HQhvbZUEL/9GqNuF0fNFJxphz/bh/TC4jW8NbA==}
     engines: {node: '>= 22.12.0'}
+    deprecated: This version of Electron has a critical bug in Buffer handling, please upgrade to 42.3.3
     hasBin: true
 
   end-of-stream@1.4.5:

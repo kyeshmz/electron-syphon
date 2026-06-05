@@ -8,6 +8,7 @@ examples/
   webgl/            a WebGL shader
   webgpu/           a WebGPU scene
   multi-window/     N windows → N Syphon servers at once
+  composite-wall/   N windows → ONE Syphon server (a video wall, 1.5–10× faster)
   frame-test/       render → freeze → prove the SENT frame == the RECEIVED frame
   single-render/    ONE render; the visible window monitors its own Syphon output
   planetary-room/   a live geospatial control room → 4 independent Syphon feeds
@@ -38,6 +39,7 @@ npm run simple-window
 npm run webgl
 npm run webgpu
 npm run multi-window   # N=8 npm run multi-window  to fan out further
+npm run composite-wall # N windows composited into ONE Syphon server (video wall); N=9 to grow the grid
 npm run frame-test     # render → freeze → verify the SENT frame == the RECEIVED frame
 npm run single-render  # ONE render; the visible window monitors its own Syphon output
 npm run planetary-room # 4 live geospatial feeds (globe / radar / quakes / telemetry)
@@ -86,6 +88,19 @@ The earthquake feed is real (`earthquake.usgs.gov`, no key, CORS); aircraft are 
 ### `signal-delay` — N WebRTC performers, N Syphon sources
 
 `npm run signal-delay` ( `N=5 npm run signal-delay` to add more ) shows the **one-offscreen-window-per-remote-peer** pattern. Each portal window holds its own `RTCPeerConnection`, receives a live video track, composites it with a broadcast overlay (`PERFORMER #k`, a city, a live latency/jitter readout from `getStats()`), and publishes it as `signal-delay · portal #k`. A hidden sender simulates the remote performers with synthetic `captureStream()` video, and **loopback signaling runs through the main process** (no STUN/TURN, no network) so it's fully self-contained. Real-phone wiring (LAN HTTP + WebSocket signaling) is documented in `signal-delay/README.md`. Why TD can't: it has no native WebRTC peer, and no way to materialize *N* live peers as *N* separately-routable GPU sources.
+
+### `composite-wall` — N windows → ONE Syphon server (the fast wall)
+
+`npm run composite-wall` ( `N=9 npm run composite-wall` to grow the grid ) is the **fast** way to build a video wall / multiview. `multi-window` publishes N *separate* servers (one per window — use it when a downstream app routes each source independently); `composite-wall` composites all N windows into **one** Syphon server with `CompositeSyphonOutput({ direct: true })`:
+
+```ts
+const wall = new CompositeSyphonOutput('electron-syphon wall', {
+  direct: true, cols, rows, tileWidth: 1280, tileHeight: 720
+})
+wall.attach(publisher.webContents, { col, row })   // place each window in a grid cell
+```
+
+Every tile is blitted into the wall in **one GPU pass**, straight into Syphon's own surface (zero-copy) — **1.5–10× faster** than N publishes/frame, scaling linearly past 25 windows where the per-server pattern falls off a cliff. It only re-blits tiles whose source repainted this frame (the atlas keeps the rest), and `outputScale: 0.5` publishes the wall at half-res for ~4× less GPU work. Open one client and you get the whole `cols×rows` wall as a single source.
 
 ## The whole publish side
 
