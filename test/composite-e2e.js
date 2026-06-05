@@ -53,19 +53,29 @@ app.whenReady().then(async () => {
   const at = (x, y) => { const i = (y * w + x) * 4; return { r: pixels[i], g: pixels[i + 1], b: pixels[i + 2] } }
   const hexOf = ({ r, g, b }) => [r > 128 ? 1 : 0, g > 128 ? 1 : 0, b > 128 ? 1 : 0].join('')
   const want = { '#ff0000': '100', '#00ff00': '010', '#0000ff': '001', '#ffff00': '110' }
-  // Sample all 4 quadrants (avoid the moving white square top strip; sample lower in each tile).
   const quads = [
     { col: 0, row: 0 }, { col: 1, row: 0 }, { col: 0, row: 1 }, { col: 1, row: 1 }
   ]
   let nonBlack = 0
   const seen = new Set()
+  // Sample a 5x5 grid across each quadrant and take the MAJORITY color, ignoring
+  // white — the animated white square (and the per-tile flip that can move it to
+  // either edge) can only cover a couple of points, so the majority is the true
+  // tile colour. This makes the check robust (previously a single sample could
+  // land on the square and flake).
   for (const q of quads) {
-    const sx = q.col * TW + TW / 2
-    const sy = q.row * TH + TH * 0.8 // low in the tile, below the animated square
-    const px = at(sx | 0, sy | 0)
-    if (px.r > 16 || px.g > 16 || px.b > 16) nonBlack++
-    seen.add(hexOf(px))
-    console.log(`  quad(${q.col},${q.row}) rgb(${px.r},${px.g},${px.b})`)
+    const tally = {}
+    let anyLit = false
+    for (let iy = 1; iy <= 5; iy++) for (let ix = 1; ix <= 5; ix++) {
+      const px = at((q.col * TW + (TW * ix) / 6) | 0, (q.row * TH + (TH * iy) / 6) | 0)
+      if (px.r > 16 || px.g > 16 || px.b > 16) anyLit = true
+      const code = hexOf(px)
+      if (code !== '111') tally[code] = (tally[code] || 0) + 1 // ignore white square
+    }
+    if (anyLit) nonBlack++
+    const dom = Object.entries(tally).sort((a, b) => b[1] - a[1])[0]
+    if (dom) seen.add(dom[0])
+    console.log(`  quad(${q.col},${q.row}) majority=${dom ? dom[0] : 'none'}`)
   }
   const colorsSeen = Object.values(want).filter((code) => seen.has(code)).length
   console.log(`paints=${paints} publishes=${out.frames} (coalesce ratio ${(paints / Math.max(1, out.frames)).toFixed(2)}x)`)
