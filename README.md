@@ -158,6 +158,17 @@ c.isValid; c.hasNewFrame; c.dispose()
 
 The **async pipeline** (default) submits without blocking and releases the texture a frame later — ~1.4 ms → ~0.13 ms/frame live (~10×). Zero-copy beats CPU ~2.8× @1080p / ~3.6× @4K (sync columns), widening with resolution. The wrapping texture is cached; publishing skips entirely with no client attached.
 
+### Where the time actually goes
+
+Measured end-to-end (one offscreen window, `useSharedTexture`, `deviceScaleFactor: 1`), the publish call is **~0.12 ms/frame — under 1% of a 16.7 ms frame**, with an ~8000 fps ceiling. The real workflow runs at **~60 fps because that's the rate Electron's offscreen renderer produces frames** (`requestAnimationFrame` / display vsync), not because of any publish cost. **The publish path is ~130× faster than the render rate — it is not your bottleneck.**
+
+So to make *your* pipeline faster, tune the render side (what actually limits it), in order of impact:
+
+1. **Render fewer pixels** — `deviceScaleFactor: 1` (avoids 4× Retina overdraw), and render/`setResolution` to the size your consumer needs, not the display's. For composite walls shown small, `outputScale`.
+2. **Don't render/publish faster than the consumer pulls** — `maxPublishRate` (publish side, keeps the renderer smooth) or `webContents.setFrameRate()` (also throttles rendering).
+3. **For many windows** — one composite server (`CompositeSyphonOutput`, ideally `direct: true`) instead of N servers; for sparse walls it's ~10× and downscales for near-free.
+4. **Faster source frames** — if you need >60 fps, drive rendering off a non-`requestAnimationFrame` loop; OSR with rAF is display-locked. This is the one real ceiling, and it's in your renderer, not here.
+
 ## Packaging (electron-builder)
 
 ```yaml
