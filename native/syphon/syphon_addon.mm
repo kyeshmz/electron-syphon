@@ -1057,19 +1057,28 @@ static Napi::Value BenchmarkScaling(const Napi::CallbackInfo &info) {
                                    : "private";
       ad.storageMode = atlasStore == "shared" ? MTLStorageModeShared
                                               : MTLStorageModePrivate;
+      // hazardTracking: 'untracked' tells Metal to skip its automatic
+      // read/write hazard synchronization on the atlas (we serialize via one
+      // FIFO queue, so correctness holds) — measures whether the driver's
+      // tracking costs anything on this path.
+      std::string hazard = opts.Has("hazardTracking")
+                               ? opts.Get("hazardTracking").ToString().Utf8Value()
+                               : "tracked";
+      if (hazard == "untracked")
+        ad.hazardTrackingMode = MTLHazardTrackingModeUntracked;
       // atlasBuffers: 1 = one persistent atlas (a write-after-read hazard makes
-      // next frame's blits wait for this frame's Syphon copy). 2 = ping-pong so
-      // frame N+1 writes a different atlas than frame N is being read from —
-      // removes the hazard, lets the GPU overlap. Only valid when every tile is
-      // rewritten each frame (full update); partial updates need the single
-      // persistent atlas.
+      // next frame's blits wait for this frame's Syphon copy). N>=2 cycles
+      // through N atlases so a frame writes a buffer no recent frame is still
+      // reading — removes the hazard, lets the GPU overlap. Only valid when every
+      // tile is rewritten each frame (full update).
       const uint32_t nbuf =
           opts.Has("atlasBuffers")
-              ? MAX(1u, MIN(2u, (uint32_t)opts.Get("atlasBuffers").ToNumber().Uint32Value()))
+              ? MAX(1u, MIN(4u, (uint32_t)opts.Get("atlasBuffers").ToNumber().Uint32Value()))
               : 1;
-      id<MTLTexture> atlasA = [dev newTextureWithDescriptor:ad];
-      id<MTLTexture> atlasB = nbuf == 2 ? [dev newTextureWithDescriptor:ad] : nil;
-      id<MTLTexture> atlas = atlasA;
+      std::vector<id<MTLTexture>> bufs(nbuf, nil);
+      for (uint32_t b = 0; b < nbuf; b++) bufs[b] = [dev newTextureWithDescriptor:ad];
+      uint32_t bufIdx = 0;
+      id<MTLTexture> atlas = bufs[0];
       id<MTLCommandQueue> q = [dev newCommandQueue];
       SyphonMetalServer *srv =
           [[SyphonMetalServer alloc] initWithName:@"scaling-atlas"
@@ -1106,10 +1115,9 @@ static Napi::Value BenchmarkScaling(const Napi::CallbackInfo &info) {
         [c commit];
         if (doWait) [c waitUntilCompleted];
         else [flight addObject:c];
-        if (atlasB) atlas = (target == atlasA) ? atlasB : atlasA; // ping-pong
+        if (nbuf > 1) { bufIdx = (bufIdx + 1) % nbuf; atlas = bufs[bufIdx]; } // cycle
       };
-      buildFrame(YES, n); // warm up: fill the whole atlas once
-      if (atlasB) buildFrame(YES, n); // fill the second buffer too
+      for (uint32_t b = 0; b < nbuf; b++) buildFrame(YES, n); // fill every buffer once
       double t0 = NowMs();
       for (uint32_t i = 0; i < iterations; i++) {
         buildFrame(wait ? YES : NO, dirty);
