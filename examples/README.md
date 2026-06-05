@@ -99,7 +99,8 @@ import * as path from 'path'
 app.whenReady().then(() => {
   const win = new BrowserWindow({
     show: false,
-    webPreferences: { offscreen: { useSharedTexture: true }, backgroundThrottling: false }
+    // deviceScaleFactor: 1 avoids 2× Retina overdraw (4× the work).
+    webPreferences: { offscreen: { useSharedTexture: true, deviceScaleFactor: 1 }, backgroundThrottling: false }
   })
   win.webContents.setFrameRate(60)
   new SyphonOutput('My Source').attach(win.webContents) // ← publishes every frame

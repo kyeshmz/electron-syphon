@@ -23,7 +23,9 @@ app.whenReady().then(() => {
     height: 720,
     show: false,
     webPreferences: {
-      offscreen: { useSharedTexture: true },
+      // deviceScaleFactor: 1 renders at exactly 1280×720 — without it a Retina
+      // display renders at 2× (4× the pixels = 4× the render+publish work).
+      offscreen: { useSharedTexture: true, deviceScaleFactor: 1 },
       backgroundThrottling: false
     }
   })
