@@ -3,11 +3,31 @@
   "version": "0.1.0",
   "description": "Publish an Electron app's GPU frames to Syphon on macOS — zero-copy, from the main process.",
   "license": "MIT",
+  "author": "kyeshmz",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kyeshmz/electron-spout.git"
+  },
+  "bugs": {
+    "url": "https://github.com/kyeshmz/electron-spout/issues"
+  },
+  "homepage": "https://github.com/kyeshmz/electron-spout#readme",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "gypfile": true,
-  "os": ["darwin"],
-  "engines": { "node": ">=18" },
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "files": [
     "dist",
     "prebuilds",
@@ -24,10 +44,18 @@
     "prebuild": "prebuildify --napi --strip",
     "rebuild:electron": "electron-rebuild -f -w syphon_addon",
     "bench": "electron test/bench.js",
+    "bench:scaling": "electron test/scaling-bench.js",
     "test": "node --expose-gc test/smoke.js",
+    "test:atlas": "electron test/atlas-check.js",
     "test:e2e": "npm --prefix examples/full-demo test",
     "make-library": "bash scripts/build-library.sh",
-    "prepack": "npm run build:ts"
+    "prepack": "npm run build:ts",
+    "release": "commit-and-tag-version",
+    "release:dry": "commit-and-tag-version --dry-run",
+    "release:minor": "commit-and-tag-version --release-as minor",
+    "release:major": "commit-and-tag-version --release-as major",
+    "release:patch": "commit-and-tag-version --release-as patch",
+    "release:push": "git push --follow-tags origin main"
   },
   "dependencies": {
     "node-addon-api": "^8.3.1",
@@ -37,10 +65,13 @@
     "electron": ">=33"
   },
   "peerDependenciesMeta": {
-    "electron": { "optional": true }
+    "electron": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@types/node": "^22.14.1",
+    "commit-and-tag-version": "^12.7.3",
     "electron": "^42.3.2",
     "electron-rebuild": "^3.2.9",
     "node-gyp": "^11.2.0",

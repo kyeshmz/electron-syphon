@@ -60,11 +60,30 @@ camera.projectionMatrix.elements[5] *= -1;        // Three.js: flip the camera
 
 ## Multiple outputs
 
-Each offscreen window → its own `SyphonOutput` → its own server (distinct sources). **24+ windows @60 fps @720p** on an M-series Mac, if you:
+Two patterns, depending on whether your consumer needs each source as a *separate* Syphon server.
 
-- keep resolution modest (`deviceScaleFactor: 1` + `setResolution`);
-- **don't** pass `--disable-gpu-vsync` / `--disable-frame-rate-limit` (they exhaust the IOSurface pool → `Failed to allocate IOSurface`);
-- for many non-routed regions, use the **composite** pattern (one window, tiled, one server).
+**Distinct servers** — each offscreen window → its own `SyphonOutput` → its own server. Use when a downstream app routes each source independently. Scales to ~16 windows before the per-server cost (N command queues + N publishes) starts to bite; keep resolution modest (`deviceScaleFactor: 1` + `setResolution`) and **don't** pass `--disable-gpu-vsync` / `--disable-frame-rate-limit` (they exhaust the IOSurface pool → `Failed to allocate IOSurface`).
+
+**One composite server** (faster at scale) — `CompositeSyphonOutput` blits N windows into one tiled atlas texture and publishes it through a *single* server. This collapses N command-buffer commits + N Syphon blits into 1 + 1:
+
+```ts
+import { CompositeSyphonOutput } from 'electron-syphon'
+
+const grid = new CompositeSyphonOutput('Wall', { cols: 4, rows: 4, tileWidth: 1280, tileHeight: 720 })
+grid.attach(win0.webContents, { col: 0, row: 0 })
+grid.attach(win1.webContents, { col: 1, row: 0 })
+// … one server, published as a single 5120×2880 frame
+```
+
+Measured (`npm run bench:scaling`, 1280×720 tiles, async) — time per *full-grid* frame, equal total pixels:
+
+| outputs | distinct servers | composite atlas | speedup |
+|---|---:|---:|---:|
+| 9  | 0.48 ms | 0.33 ms | **1.5×** |
+| 16 | 1.63 ms | 0.66 ms | **2.5×** |
+| 25 | 5.96 ms | 0.99 ms | **6.0×** |
+
+The per-server pattern's cost per tile grows and falls off a cliff (~0.24 ms/tile at 25 outputs — can no longer sustain the grid); the atlas stays flat (~0.04 ms/tile). Sources should render at `tileWidth × tileHeight` (larger frames are cropped to the tile).
 
 `examples/full-demo/` shows every capture method side by side with live controls.
 
@@ -76,6 +95,7 @@ import { SyphonServer, SyphonClient, listServers } from 'electron-syphon'
 const s = new SyphonServer('My Server')
 s.publishSurface(handle, w, h, flipY)                // zero-copy (sync)
 s.publishSurfaceAsync(handle, w, h, flipY); s.reap() // zero-copy (pipelined)
+s.publishAtlas(tiles, atlasW, atlasH, flipY)         // composite N→1 (see CompositeSyphonOutput)
 s.publishImageBuffer(buf, w, h, 'rgba', flipY)       // CPU
 s.hasClients; s.name; s.dispose()
 
@@ -118,9 +138,19 @@ The addon's `@executable_path/../Frameworks` rpath resolves to `Contents/Framewo
 
 ## Build from source
 
+Consumers never need this — `npm install` pulls a prebuilt N-API binary and the vendored framework. Build from source only to hack on the addon or update Syphon. It assumes a standard macOS dev box:
+
+- **macOS 11+** — Syphon is macOS-only; other platforms compile a no-op stub (`native/syphon/stub.cpp`).
+- **Xcode Command Line Tools** (`xcode-select --install`) — provides `clang`/`clang++`, the macOS SDK and system frameworks linked by the addon (Metal, IOSurface, Foundation, QuartzCore), plus `xcodebuild`, `otool`, `lipo`, `install_name_tool`, `ditto` used by the scripts.
+- **clang with ARC + C++17 + libc++** — the `.mm` `#error`s unless built with Objective-C ARC; `binding.gyp` pins `CLANG_ENABLE_OBJC_ARC=YES`, `CLANG_CXX_LANGUAGE_STANDARD=c++17`, `libc++`, RTTI + C++ exceptions on, `MACOSX_DEPLOYMENT_TARGET=11.0`.
+- **Node ≥ 18 + node-gyp's deps** (Python 3 and `make`, both shipped with the CLT) — to compile. **node-addon-api 8 / N-API**, so `prebuildify --napi` emits one ABI-stable `.node` that loads across Electron/Node versions without a rebuild.
+- **git** — only for `build-syphon-framework.sh`, which clones and `xcodebuild`s [Syphon-Framework](https://github.com/Syphon/Syphon-Framework) (universal arm64 + x86_64).
+- The vendored **`Frameworks/Syphon.framework`** must be present to link; rpaths resolve it in dev and at `@executable_path/../Frameworks` once packaged.
+
 ```bash
-npm run make-library                  # framework + dist + prebuilds + verify
-./scripts/build-syphon-framework.sh   # rebuild the vendored framework
+npm run make-library                       # framework (if missing) + dist + prebuilds + verify
+ARCHS="arm64 x86_64" npm run make-library  # universal (Intel + Apple Silicon) prebuild
+./scripts/build-syphon-framework.sh        # rebuild the vendored Syphon.framework only
 ```
 
 ## License

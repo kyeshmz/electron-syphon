@@ -9,6 +9,16 @@ export interface NativeSyphonServer {
   /** Zero-copy, async: submit only. Returns 1 if enqueued (keep the Electron
    *  texture alive until a later reap() reports completion), 0 if skipped. */
   publishSurfaceAsync(handle: Buffer, width: number, height: number, flipY: boolean): number
+  /** Composite N source IOSurfaces into one atlas texture on a single command
+   *  buffer, then publish ONCE (the measured 1.5–6× multi-output win). Async:
+   *  every source texture must stay alive until a later reap()/drain() reports
+   *  completion. Returns 1 if a frame was enqueued, 0 if nothing valid. */
+  publishAtlas(
+    tiles: { handle: Buffer; x: number; y: number; w: number; h: number }[],
+    atlasWidth: number,
+    atlasHeight: number,
+    flipY: boolean
+  ): number
   /** How many async frames finished on the GPU since last call (drops them). */
   reap(): number
   /** Wait for all in-flight async frames; returns how many were drained. */

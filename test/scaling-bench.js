@@ -1,0 +1,21 @@
+const path = require('path')
+const addon = require('node-gyp-build')(path.join(__dirname, '..'))
+function run() {
+  const GRIDS = [[2,2],[3,3],[4,4],[5,5]]
+  const tileW = 1280, tileH = 720, iters = 200
+  console.log(`\nMulti-output scaling — tile ${tileW}x${tileH}, async, flip=true`)
+  console.log('outputs\ttotalMP\tmode     \tframeMs\tperTileMs\tgridFps')
+  for (const [cols, rows] of GRIDS) {
+    const res = {}
+    for (const mode of ['multi','atlas','composite']) {
+      const r = addon.benchmarkScaling({ width: tileW, height: tileH, cols, rows, iterations: iters, mode, wait: false, flip: true })
+      res[mode] = r
+      console.log(`${r.outputs}\t${r.totalMegapixels.toFixed(1)}\t${mode.padEnd(9)}\t${r.avgMs.toFixed(3)}\t${r.perTileMs.toFixed(4)}\t${r.fps.toFixed(0)}`)
+    }
+    console.log(`\t\t→ atlas ${(res.multi.avgMs/res.atlas.avgMs).toFixed(2)}x faster than multi; composite(ceiling) ${(res.multi.avgMs/res.composite.avgMs).toFixed(2)}x\n`)
+  }
+}
+if (process.versions.electron) {
+  const {app}=require('electron'); app.disableHardwareAcceleration()
+  app.whenReady().then(run).then(()=>app.exit(0)).catch(e=>{console.error(e);app.exit(1)})
+} else run()

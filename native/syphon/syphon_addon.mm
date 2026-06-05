@@ -103,6 +103,18 @@ private:
 
   // In-flight command buffers for the async path (submission order == FIFO).
   NSMutableArray<id<MTLCommandBuffer>> *inflight_ = nil;
+
+  // Composite/atlas path: one persistent GPU-private atlas texture that N source
+  // surfaces are blitted into (one command buffer), then published ONCE. This is
+  // the measured 1.5-6x multi-output win (see benchmarkScaling). Source-surface
+  // wrappers are cached by pointer here WITHOUT the single-size assumption of
+  // surfaceTextures_, because atlas tiles can differ in size.
+  id<MTLTexture> atlas_ = nil;
+  NSUInteger atlasW_ = 0, atlasH_ = 0;
+  NSMutableDictionary<NSNumber *, id<MTLTexture>> *atlasSrcTextures_ = nil;
+
+  Napi::Value PublishAtlas(const Napi::CallbackInfo &info);
+  id<MTLTexture> AtlasSourceTexture(IOSurfaceRef surface);
 };
 
 SyphonServer::SyphonServer(const Napi::CallbackInfo &info)
@@ -124,6 +136,7 @@ SyphonServer::SyphonServer(const Napi::CallbackInfo &info)
     }
     queue_ = [device_ newCommandQueue];
     surfaceTextures_ = [NSMutableDictionary dictionary];
+    atlasSrcTextures_ = [NSMutableDictionary dictionary];
     inflight_ = [NSMutableArray array];
     NSString *nsName = [NSString stringWithUTF8String:name.c_str()];
     server_ = [[SyphonMetalServer alloc] initWithName:nsName
@@ -145,6 +158,8 @@ SyphonServer::~SyphonServer() {
   }
   cpuTexture_ = nil;
   surfaceTextures_ = nil;
+  atlasSrcTextures_ = nil;
+  atlas_ = nil;
   inflight_ = nil;
   queue_ = nil;
   device_ = nil;
@@ -159,6 +174,9 @@ void SyphonServer::Dispose(const Napi::CallbackInfo &info) {
     }
     cpuTexture_ = nil;
     [surfaceTextures_ removeAllObjects];
+    [atlasSrcTextures_ removeAllObjects];
+    atlas_ = nil;
+    atlasW_ = atlasH_ = 0;
     cpuW_ = cpuH_ = surfW_ = surfH_ = 0;
   }
 }
@@ -243,6 +261,130 @@ uint32_t SyphonServer::DrainInternal() {
   for (id<MTLCommandBuffer> c in inflight_) [c waitUntilCompleted];
   [inflight_ removeAllObjects];
   return n;
+}
+
+// Wrap (and cache) a source IOSurface for the atlas path. Unlike
+// TextureForSurface this makes no single-size assumption (tiles may differ), and
+// is bounded so it can't grow without limit.
+id<MTLTexture> SyphonServer::AtlasSourceTexture(IOSurfaceRef surface) {
+  NSNumber *key = @((uintptr_t)surface);
+  id<MTLTexture> t = atlasSrcTextures_[key];
+  if (t) return t;
+  const NSUInteger w = IOSurfaceGetWidth(surface);
+  const NSUInteger h = IOSurfaceGetHeight(surface);
+  if (w == 0 || h == 0) return nil;
+  MTLTextureDescriptor *desc = [MTLTextureDescriptor
+      texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                   width:w
+                                  height:h
+                               mipmapped:NO];
+  desc.usage = MTLTextureUsageShaderRead;
+  desc.storageMode = MTLStorageModeShared;
+  t = [device_ newTextureWithDescriptor:desc iosurface:surface plane:0];
+  if (t) {
+    // Electron rotates a small pool per source; a few dozen tiles × ~10 surfaces
+    // each is the realistic ceiling. Flush if it ever runs away.
+    if (atlasSrcTextures_.count > 512) [atlasSrcTextures_ removeAllObjects];
+    atlasSrcTextures_[key] = t;
+  }
+  return t;
+}
+
+// publishAtlas(tiles, atlasW, atlasH, flipY) — composite N source IOSurfaces
+// into one GPU-private atlas on a single command buffer, then publish ONCE.
+// tiles: Array<{ handle: Buffer, x, y, w, h }>. Async (submit-only): the caller
+// keeps every source Electron texture alive until a later reap()/drain() reports
+// completion (same contract as publishSurfaceAsync — the blit COPIES each source
+// into the atlas, so once the buffer completes the sources are free).
+// Returns 1 if a frame was enqueued, 0 if nothing valid to publish.
+Napi::Value SyphonServer::PublishAtlas(const Napi::CallbackInfo &info) {
+  Napi::Env env = info.Env();
+  if (!server_) return Napi::Number::New(env, 0);
+  if (info.Length() < 4 || !info[0].IsArray() || !info[1].IsNumber() ||
+      !info[2].IsNumber() || !info[3].IsBoolean()) {
+    Napi::TypeError::New(
+        env, "publishAtlas(tiles: Array<{handle,x,y,w,h}>, atlasW, atlasH, flipY)")
+        .ThrowAsJavaScriptException();
+    return Napi::Number::New(env, 0);
+  }
+  Napi::Array tiles = info[0].As<Napi::Array>();
+  const NSUInteger aw = info[1].As<Napi::Number>().Uint32Value();
+  const NSUInteger ah = info[2].As<Napi::Number>().Uint32Value();
+  const BOOL flipped = info[3].As<Napi::Boolean>().Value() ? YES : NO;
+  const uint32_t count = tiles.Length();
+  if (aw == 0 || ah == 0 || count == 0) return Napi::Number::New(env, 0);
+
+  @autoreleasepool {
+    // (Re)allocate the persistent private atlas if the size changed.
+    if (!atlas_ || atlasW_ != aw || atlasH_ != ah) {
+      MTLTextureDescriptor *ad = [MTLTextureDescriptor
+          texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                       width:aw
+                                      height:ah
+                                   mipmapped:NO];
+      ad.usage = MTLTextureUsageShaderRead;
+      ad.storageMode = MTLStorageModePrivate;
+      atlas_ = [device_ newTextureWithDescriptor:ad];
+      atlasW_ = aw;
+      atlasH_ = ah;
+    }
+    if (!atlas_) return Napi::Number::New(env, 0);
+
+    id<MTLCommandBuffer> cmd = [queue_ commandBuffer];
+    id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
+    uint32_t blitted = 0;
+    for (uint32_t i = 0; i < count; i++) {
+      Napi::Value tv = tiles[i];
+      if (!tv.IsObject()) continue;
+      Napi::Object tile = tv.As<Napi::Object>();
+      Napi::Value hv = tile.Get("handle");
+      if (!hv.IsBuffer()) continue;
+      Napi::Buffer<uint8_t> handle = hv.As<Napi::Buffer<uint8_t>>();
+      if (handle.Length() < sizeof(void *)) continue;
+      IOSurfaceRef surface = *reinterpret_cast<IOSurfaceRef *>(handle.Data());
+      if (!surface) continue;
+      id<MTLTexture> src = AtlasSourceTexture(surface);
+      if (!src) continue;
+
+      const NSUInteger sw = src.width, sh = src.height;
+      NSUInteger dx = tile.Has("x") ? tile.Get("x").ToNumber().Uint32Value() : 0;
+      NSUInteger dy = tile.Has("y") ? tile.Get("y").ToNumber().Uint32Value() : 0;
+      // Clip the copy to the atlas bounds so a stray rect can't fault the blit.
+      NSUInteger cw = tile.Has("w") ? tile.Get("w").ToNumber().Uint32Value() : sw;
+      NSUInteger ch = tile.Has("h") ? tile.Get("h").ToNumber().Uint32Value() : sh;
+      cw = MIN(cw, sw);
+      ch = MIN(ch, sh);
+      if (dx >= aw || dy >= ah) continue;
+      cw = MIN(cw, aw - dx);
+      ch = MIN(ch, ah - dy);
+      if (cw == 0 || ch == 0) continue;
+
+      [blit copyFromTexture:src
+                sourceSlice:0
+                sourceLevel:0
+               sourceOrigin:MTLOriginMake(0, 0, 0)
+                 sourceSize:MTLSizeMake(cw, ch, 1)
+                  toTexture:atlas_
+           destinationSlice:0
+           destinationLevel:0
+          destinationOrigin:MTLOriginMake(dx, dy, 0)];
+      blitted++;
+    }
+    [blit endEncoding];
+    if (blitted == 0) {
+      // Nothing valid — don't publish a (possibly stale/garbage) atlas.
+      [cmd commit];
+      return Napi::Number::New(env, 0);
+    }
+    NSRect region = NSMakeRect(0, 0, aw, ah);
+    [server_ publishFrameTexture:atlas_
+                 onCommandBuffer:cmd
+                     imageRegion:region
+                         flipped:flipped];
+    [cmd commit];
+    [inflight_ addObject:cmd]; // released later by reap()/drain()
+  }
+  return Napi::Number::New(env, 1);
 }
 
 void SyphonServer::EnsureCpuTexture(NSUInteger w, NSUInteger h,
@@ -474,6 +616,7 @@ Napi::Object SyphonServer::Init(Napi::Env env, Napi::Object exports) {
       {
           InstanceMethod("publishSurface", &SyphonServer::PublishSurface),
           InstanceMethod("publishSurfaceAsync", &SyphonServer::PublishSurfaceAsync),
+          InstanceMethod("publishAtlas", &SyphonServer::PublishAtlas),
           InstanceMethod("publishImageBuffer", &SyphonServer::PublishImageBuffer),
           InstanceMethod("reap", &SyphonServer::Reap),
           InstanceMethod("drain", &SyphonServer::Drain),
@@ -738,10 +881,287 @@ static Napi::Value ListServers(const Napi::CallbackInfo &info) {
   return out;
 }
 
+// ---------------------------------------------------------------------------
+//  benchmarkScaling — measure how the publish path scales across MANY outputs,
+//  the way a real app does (N offscreen windows → Syphon). Two patterns, sized
+//  to publish the SAME total pixel area per frame so the comparison is fair:
+//
+//    'multi'     : cols*rows independent SyphonMetalServers, each with its own
+//                  command queue + IOSurface (= the "one window, one server"
+//                  pattern). One "frame" publishes a tile to every server.
+//    'composite' : ONE server publishing a single (cols*w)×(rows*h) IOSurface
+//                  (= the "one big window, tiled regions, one server" pattern).
+//                  One "frame" is a single publish of the whole grid.
+//
+//  Reported avgMs is wall-clock per FULL-GRID frame (all tiles updated once),
+//  so lower = the whole multi-output workflow runs faster.
+// ---------------------------------------------------------------------------
+static IOSurfaceRef MakeFilledSurface(NSUInteger w, NSUInteger h) {
+  NSDictionary *props = @{
+    (id)kIOSurfaceWidth : @(w),
+    (id)kIOSurfaceHeight : @(h),
+    (id)kIOSurfaceBytesPerElement : @(4),
+    (id)kIOSurfacePixelFormat : @((uint32_t)'BGRA'),
+  };
+  IOSurfaceRef s = IOSurfaceCreate((__bridge CFDictionaryRef)props);
+  if (!s) return nullptr;
+  IOSurfaceLock(s, 0, nullptr);
+  memset(IOSurfaceGetBaseAddress(s), 0x80, IOSurfaceGetAllocSize(s));
+  IOSurfaceUnlock(s, 0, nullptr);
+  return s;
+}
+
+static id<MTLTexture> WrapSurface(id<MTLDevice> dev, IOSurfaceRef s,
+                                  NSUInteger w, NSUInteger h) {
+  MTLTextureDescriptor *desc = [MTLTextureDescriptor
+      texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                   width:w
+                                  height:h
+                               mipmapped:NO];
+  desc.usage = MTLTextureUsageShaderRead;
+  desc.storageMode = MTLStorageModeShared;
+  return [dev newTextureWithDescriptor:desc iosurface:s plane:0];
+}
+
+static Napi::Value BenchmarkScaling(const Napi::CallbackInfo &info) {
+  Napi::Env env = info.Env();
+  Napi::Object opts = (info.Length() > 0 && info[0].IsObject())
+                          ? info[0].As<Napi::Object>()
+                          : Napi::Object::New(env);
+  auto numOr = [&](const char *k, uint32_t d) -> uint32_t {
+    return opts.Has(k) ? opts.Get(k).ToNumber().Uint32Value() : d;
+  };
+  const NSUInteger tileW = numOr("width", 1280);
+  const NSUInteger tileH = numOr("height", 720);
+  const uint32_t cols = numOr("cols", 4);
+  const uint32_t rows = numOr("rows", 4);
+  const uint32_t iterations = numOr("iterations", 200);
+  const bool wait = opts.Has("wait") ? opts.Get("wait").ToBoolean().Value() : false;
+  const BOOL flipped = opts.Has("flip")
+                           ? (opts.Get("flip").ToBoolean().Value() ? YES : NO)
+                           : YES;
+  std::string mode =
+      opts.Has("mode") ? opts.Get("mode").ToString().Utf8Value() : "multi";
+  const uint32_t n = cols * rows;
+
+  id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
+  if (!dev) {
+    Napi::Error::New(env, "No Metal device").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  double total = 0.0;
+  @autoreleasepool {
+    if (mode == "composite") {
+      const NSUInteger w = tileW * cols, h = tileH * rows;
+      IOSurfaceRef surf = MakeFilledSurface(w, h);
+      id<MTLTexture> tex = WrapSurface(dev, surf, w, h);
+      id<MTLCommandQueue> q = [dev newCommandQueue];
+      SyphonMetalServer *srv =
+          [[SyphonMetalServer alloc] initWithName:@"scaling-composite"
+                                           device:dev
+                                          options:nil];
+      NSRect region = NSMakeRect(0, 0, w, h);
+      // warm up
+      { id<MTLCommandBuffer> c = [q commandBuffer];
+        [srv publishFrameTexture:tex onCommandBuffer:c imageRegion:region flipped:flipped];
+        [c commit]; [c waitUntilCompleted]; }
+      NSMutableArray<id<MTLCommandBuffer>> *flight = [NSMutableArray array];
+      double t0 = NowMs();
+      for (uint32_t i = 0; i < iterations; i++) {
+        id<MTLCommandBuffer> c = [q commandBuffer];
+        [srv publishFrameTexture:tex onCommandBuffer:c imageRegion:region flipped:flipped];
+        [c commit];
+        if (wait) [c waitUntilCompleted];
+        else {
+          [flight addObject:c];
+          while (flight.count > 0 &&
+                 (flight[0].status == MTLCommandBufferStatusCompleted ||
+                  flight[0].status == MTLCommandBufferStatusError))
+            [flight removeObjectAtIndex:0];
+        }
+      }
+      for (id<MTLCommandBuffer> c in flight) [c waitUntilCompleted];
+      total = NowMs() - t0;
+      [srv stop];
+      CFRelease(surf);
+    } else if (mode == "atlas") {
+      // Realistic composite: n separate source IOSurfaces (one per "window"),
+      // blitted into ONE atlas texture on a single command buffer, then ONE
+      // Syphon publish. This is what a shippable CompositeOutput would do.
+      const NSUInteger aw = tileW * cols, ah = tileH * rows;
+      std::vector<IOSurfaceRef> surfs(n, nullptr);
+      std::vector<id<MTLTexture>> texs(n, nil);
+      for (uint32_t k = 0; k < n; k++) {
+        surfs[k] = MakeFilledSurface(tileW, tileH);
+        texs[k] = WrapSurface(dev, surfs[k], tileW, tileH);
+      }
+      MTLTextureDescriptor *ad = [MTLTextureDescriptor
+          texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                       width:aw
+                                      height:ah
+                                   mipmapped:NO];
+      ad.usage = MTLTextureUsageShaderRead;
+      ad.storageMode = MTLStorageModePrivate; // GPU-only atlas, blit dst + Syphon src
+      id<MTLTexture> atlas = [dev newTextureWithDescriptor:ad];
+      id<MTLCommandQueue> q = [dev newCommandQueue];
+      SyphonMetalServer *srv =
+          [[SyphonMetalServer alloc] initWithName:@"scaling-atlas"
+                                           device:dev
+                                          options:nil];
+      NSRect region = NSMakeRect(0, 0, aw, ah);
+      NSMutableArray<id<MTLCommandBuffer>> *flight = [NSMutableArray array];
+      auto buildFrame = [&](BOOL doWait) {
+        id<MTLCommandBuffer> c = [q commandBuffer];
+        id<MTLBlitCommandEncoder> blit = [c blitCommandEncoder];
+        for (uint32_t k = 0; k < n; k++) {
+          NSUInteger cx = (k % cols) * tileW, cy = (k / cols) * tileH;
+          [blit copyFromTexture:texs[k]
+                    sourceSlice:0 sourceLevel:0
+                   sourceOrigin:MTLOriginMake(0, 0, 0)
+                     sourceSize:MTLSizeMake(tileW, tileH, 1)
+                      toTexture:atlas
+               destinationSlice:0 destinationLevel:0
+              destinationOrigin:MTLOriginMake(cx, cy, 0)];
+        }
+        [blit endEncoding];
+        [srv publishFrameTexture:atlas onCommandBuffer:c imageRegion:region flipped:flipped];
+        [c commit];
+        if (doWait) [c waitUntilCompleted];
+        else [flight addObject:c];
+      };
+      buildFrame(YES); // warm up
+      double t0 = NowMs();
+      for (uint32_t i = 0; i < iterations; i++) {
+        buildFrame(wait ? YES : NO);
+        if (!wait) {
+          while (flight.count > 0 &&
+                 (flight[0].status == MTLCommandBufferStatusCompleted ||
+                  flight[0].status == MTLCommandBufferStatusError))
+            [flight removeObjectAtIndex:0];
+        }
+      }
+      for (id<MTLCommandBuffer> c in flight) [c waitUntilCompleted];
+      total = NowMs() - t0;
+      [srv stop];
+      for (uint32_t k = 0; k < n; k++) if (surfs[k]) CFRelease(surfs[k]);
+    } else {
+      // 'multi': n independent servers, queues, surfaces.
+      NSMutableArray<SyphonMetalServer *> *servers = [NSMutableArray array];
+      NSMutableArray<id<MTLCommandQueue>> *queues = [NSMutableArray array];
+      std::vector<IOSurfaceRef> surfs(n, nullptr);
+      std::vector<id<MTLTexture>> texs(n, nil);
+      NSMutableArray<id<MTLCommandBuffer>> *flight = [NSMutableArray array];
+      for (uint32_t k = 0; k < n; k++) {
+        surfs[k] = MakeFilledSurface(tileW, tileH);
+        texs[k] = WrapSurface(dev, surfs[k], tileW, tileH);
+        [queues addObject:[dev newCommandQueue]];
+        NSString *nm = [NSString stringWithFormat:@"scaling-multi-%u", k];
+        [servers addObject:[[SyphonMetalServer alloc] initWithName:nm
+                                                            device:dev
+                                                           options:nil]];
+      }
+      NSRect region = NSMakeRect(0, 0, tileW, tileH);
+      // warm up: one frame to each server
+      for (uint32_t k = 0; k < n; k++) {
+        id<MTLCommandBuffer> c = [queues[k] commandBuffer];
+        [servers[k] publishFrameTexture:texs[k] onCommandBuffer:c imageRegion:region flipped:flipped];
+        [c commit]; [c waitUntilCompleted];
+      }
+      double t0 = NowMs();
+      for (uint32_t i = 0; i < iterations; i++) {
+        for (uint32_t k = 0; k < n; k++) {
+          id<MTLCommandBuffer> c = [queues[k] commandBuffer];
+          [servers[k] publishFrameTexture:texs[k] onCommandBuffer:c imageRegion:region flipped:flipped];
+          [c commit];
+          if (wait) [c waitUntilCompleted];
+          else [flight addObject:c];
+        }
+        if (!wait) {
+          while (flight.count > 0 &&
+                 (flight[0].status == MTLCommandBufferStatusCompleted ||
+                  flight[0].status == MTLCommandBufferStatusError))
+            [flight removeObjectAtIndex:0];
+        }
+      }
+      for (id<MTLCommandBuffer> c in flight) [c waitUntilCompleted];
+      total = NowMs() - t0;
+      for (SyphonMetalServer *s in servers) [s stop];
+      for (uint32_t k = 0; k < n; k++) if (surfs[k]) CFRelease(surfs[k]);
+    }
+  }
+
+  const double avg = total / iterations;        // per full-grid frame
+  const double perTile = avg / (cols * rows);    // per individual output
+  const double mp = (double)tileW * tileH * cols * rows / 1e6;
+  Napi::Object out = Napi::Object::New(env);
+  out.Set("mode", Napi::String::New(env, mode));
+  out.Set("tileWidth", Napi::Number::New(env, tileW));
+  out.Set("tileHeight", Napi::Number::New(env, tileH));
+  out.Set("cols", Napi::Number::New(env, cols));
+  out.Set("rows", Napi::Number::New(env, rows));
+  out.Set("outputs", Napi::Number::New(env, n));
+  out.Set("iterations", Napi::Number::New(env, iterations));
+  out.Set("wait", Napi::Boolean::New(env, wait));
+  out.Set("flip", Napi::Boolean::New(env, flipped == YES));
+  out.Set("totalMs", Napi::Number::New(env, total));
+  out.Set("avgMs", Napi::Number::New(env, avg));
+  out.Set("perTileMs", Napi::Number::New(env, perTile));
+  out.Set("fps", Napi::Number::New(env, avg > 0 ? 1000.0 / avg : 0.0));
+  out.Set("totalMegapixels", Napi::Number::New(env, mp));
+  out.Set("throughputGBps",
+          Napi::Number::New(env, mp * 1e6 * 4.0 * iterations / (total / 1000.0) / 1e9));
+  return out;
+}
+
+// Test-only: create a solid-color BGRA IOSurface and return a Buffer holding its
+// IOSurfaceRef pointer (the same handle shape Electron's paint event delivers),
+// so JS tests can exercise publishAtlas without an Electron renderer. The Buffer
+// keeps a +1 retain on the surface and CFReleases it when GC'd.
+static Napi::Value MakeTestSurface(const Napi::CallbackInfo &info) {
+  Napi::Env env = info.Env();
+  const NSUInteger w = info[0].As<Napi::Number>().Uint32Value();
+  const NSUInteger h = info[1].As<Napi::Number>().Uint32Value();
+  const uint8_t r = info[2].As<Napi::Number>().Uint32Value();
+  const uint8_t g = info[3].As<Napi::Number>().Uint32Value();
+  const uint8_t b = info[4].As<Napi::Number>().Uint32Value();
+  NSDictionary *props = @{
+    (id)kIOSurfaceWidth : @(w),
+    (id)kIOSurfaceHeight : @(h),
+    (id)kIOSurfaceBytesPerElement : @(4),
+    (id)kIOSurfacePixelFormat : @((uint32_t)'BGRA'),
+  };
+  IOSurfaceRef s = IOSurfaceCreate((__bridge CFDictionaryRef)props);
+  if (!s) {
+    Napi::Error::New(env, "IOSurfaceCreate failed").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+  IOSurfaceLock(s, 0, nullptr);
+  uint8_t *base = (uint8_t *)IOSurfaceGetBaseAddress(s);
+  const size_t bpr = IOSurfaceGetBytesPerRow(s);
+  for (NSUInteger y = 0; y < h; y++) {
+    uint8_t *row = base + y * bpr;
+    for (NSUInteger x = 0; x < w; x++) {
+      row[x * 4 + 0] = b;
+      row[x * 4 + 1] = g;
+      row[x * 4 + 2] = r;
+      row[x * 4 + 3] = 255;
+    }
+  }
+  IOSurfaceUnlock(s, 0, nullptr);
+  // Copy the pointer bytes into a normal (non-external) Buffer — Electron forbids
+  // external buffers. The surface is intentionally leaked (test-only, short-lived
+  // process); the +1 retain from IOSurfaceCreate keeps it alive for the run.
+  return Napi::Buffer<uint8_t>::Copy(env, reinterpret_cast<uint8_t *>(&s),
+                                     sizeof(IOSurfaceRef));
+}
+
 static Napi::Object InitAll(Napi::Env env, Napi::Object exports) {
   SyphonServer::Init(env, exports);
   SyphonClient::Init(env, exports);
   exports.Set("listServers", Napi::Function::New(env, ListServers));
+  exports.Set("benchmarkScaling", Napi::Function::New(env, BenchmarkScaling));
+  exports.Set("__makeTestSurface", Napi::Function::New(env, MakeTestSurface));
   return exports;
 }
 
