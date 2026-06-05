@@ -160,14 +160,14 @@ The **async pipeline** (default) submits without blocking and releases the textu
 
 ### Where the time actually goes
 
-Measured end-to-end (one offscreen window, `useSharedTexture`, `deviceScaleFactor: 1`), the publish call is **~0.12 ms/frame — under 1% of a 16.7 ms frame**, with an ~8000 fps ceiling. The real workflow runs at **~60 fps because that's the rate Electron's offscreen renderer produces frames** (`requestAnimationFrame` / display vsync), not because of any publish cost. **The publish path is ~130× faster than the render rate — it is not your bottleneck.**
+Measured end-to-end (one offscreen window, `useSharedTexture`, `deviceScaleFactor: 1`), the publish call is **~0.12–0.16 ms/frame — under 1% of a 16.7 ms frame**, with a ~6000–8000 fps ceiling. The workflow is limited by **how fast Electron's offscreen renderer produces frames**, not by any publish cost — the publish keeps up trivially even at 240 fps (measured 238 fps published from a 238 fps source). **The publish path is the bottleneck nowhere; tune the render side.**
 
-So to make *your* pipeline faster, tune the render side (what actually limits it), in order of impact:
+In order of impact:
 
 1. **Render fewer pixels** — `deviceScaleFactor: 1` (avoids 4× Retina overdraw), and render/`setResolution` to the size your consumer needs, not the display's. For composite walls shown small, `outputScale`.
 2. **Don't render/publish faster than the consumer pulls** — `maxPublishRate` (publish side, keeps the renderer smooth) or `webContents.setFrameRate()` (also throttles rendering).
 3. **For many windows** — one composite server (`CompositeSyphonOutput`, ideally `direct: true`) instead of N servers; for sparse walls it's ~10× and downscales for near-free.
-4. **Faster source frames** — if you need >60 fps, drive rendering off a non-`requestAnimationFrame` loop; OSR with rAF is display-locked. This is the one real ceiling, and it's in your renderer, not here.
+4. **Need >60 fps? Don't drive rendering with `requestAnimationFrame`** — rAF is vsync-locked to ~60 Hz, so it's the limiter (not OSR or the publish). A non-rAF render loop (`setInterval`/`setTimeout`, or a manual WebGL/WebGPU draw loop) plus `webContents.setFrameRate(120/240)` lets OSR deliver **up to ~240 fps** (measured: 120 → 120, 240 → 238 paints/sec), and the publish still keeps up at <5% of the frame budget.
 
 ## Packaging (electron-builder)
 
