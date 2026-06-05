@@ -279,8 +279,9 @@ export class SyphonOutput {
       return
     }
 
-    const w = info.codedSize.width
-    const h = info.codedSize.height
+    const cs = info.codedSize // read the getter once, not twice
+    const w = cs.width
+    const h = cs.height
     this.noteRealized(w, h)
     const t0 = performance.now()
 
