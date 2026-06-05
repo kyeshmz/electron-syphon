@@ -501,7 +501,9 @@ Both unlocks need the **same upstream change**: a Syphon API to publish a caller
 of `IOSurface`s (i.e. what Spout gets from its keyed-mutex shared texture on the Windows side), and/or
 Electron accepting an external render target. Until one of those exists, this library is at its
 measurable floor, and further local micro-optimization has been verified — repeatedly, by building the
-candidates and measuring 1.00× — to yield nothing.
+candidates and measuring 1.00× — to yield nothing. The concrete, fileable form of that upstream ask
+(two additive API proposals, grounded in the shipping headers + our measurements) is written up in
+[`docs/UPSTREAM-SYPHON-PROPOSAL.md`](docs/UPSTREAM-SYPHON-PROPOSAL.md).
 
 ---
 
