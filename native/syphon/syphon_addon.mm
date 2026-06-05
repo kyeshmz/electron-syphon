@@ -405,6 +405,13 @@ Napi::Value SyphonServer::PublishAtlas(const Napi::CallbackInfo &info) {
       ch = MIN(ch, ah - dy);
       if (cw == 0 || ch == 0) continue;
 
+      // Syphon flips the WHOLE atlas when flipped:YES, which would mirror the
+      // grid layout (top row -> bottom). Pre-mirror each tile's row placement so
+      // it lands back in its own cell after the flip — giving a grid-preserving
+      // per-tile flip that matches the direct backend (instead of a flipped
+      // grid). No-op when not flipped.
+      const NSUInteger ddy = flipped ? (ah - dy - ch) : dy;
+
       [blit copyFromTexture:src
                 sourceSlice:0
                 sourceLevel:0
@@ -413,7 +420,7 @@ Napi::Value SyphonServer::PublishAtlas(const Napi::CallbackInfo &info) {
                   toTexture:dst
            destinationSlice:0
            destinationLevel:0
-          destinationOrigin:MTLOriginMake(dx, dy, 0)];
+          destinationOrigin:MTLOriginMake(dx, ddy, 0)];
       blitted++;
     }
     [blit endEncoding];

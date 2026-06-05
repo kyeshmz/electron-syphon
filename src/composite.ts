@@ -27,9 +27,10 @@ export interface CompositeOptions {
   tileWidth?: number
   /** Pixel height of each tile. Default 720. */
   tileHeight?: number
-  /** Flip the published atlas vertically (Electron OSR is top-left origin; many
-   *  Syphon clients expect bottom-left). Default true. Forced false when
-   *  `direct` is set. */
+  /** Flip each tile vertically (Electron OSR is top-left origin; many Syphon
+   *  clients expect bottom-left). Default true. The flip is per-tile — each
+   *  source is mirrored in place and the grid layout is preserved — on both
+   *  backends. */
   flipY?: boolean
   /**
    * EXPERIMENTAL zero-copy backend: composite tiles in one render pass straight
@@ -37,9 +38,9 @@ export interface CompositeOptions {
    * into an intermediate atlas that Syphon then copies. One pass instead of two —
    * ~1.3–1.4× faster than the atlas backend for `flipY = false`, and ~1.5–2×
    * faster for `flipY = true` (the atlas path flips via a separate Syphon copy).
-   * Supports both orientations; note the flip is **per-tile** (each source is
-   * mirrored in place, grid layout preserved) rather than the atlas backend's
-   * whole-surface flip. Publishes one persistent surface (same tear-under-load
+   * Supports both orientations; the flip is per-tile (each source mirrored in
+   * place, grid preserved) — same as the atlas backend. Publishes one persistent
+   * surface (same tear-under-load
    * profile as any Syphon server). Default false. */
   direct?: boolean
   /**
