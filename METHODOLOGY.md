@@ -450,7 +450,62 @@ A few concrete details that the rationale above rests on:
 
 ---
 
-## 10. Further reading
+## 10. The performance frontier — what's at the floor, and the only two ways past it
+
+Every layer of the publish pipeline has been profiled and driven to its structural floor. This
+section records *where* the floor is on each layer, and — honestly — the only two changes that could
+move it, both of which require an upstream API we do not own. It exists so nobody re-treads ground
+that's already been measured to a dead end.
+
+**Each layer, and why it can't go lower with the current primitives:**
+
+- **Single-window publish — 1 copy (floor).** `PublishSurfaceCore` wraps Electron's `IOSurface` as a
+  *cached, zero-copy* `MTLTexture`, then `publishFrameTexture` does Syphon's one internal copy into the
+  server's own surface. No readback, no second copy. The zero-copy `direct` trick that helps compositing
+  can't help here — single-window is already a single blit, and `publishFrameTexture` is the optimized
+  route for it.
+- **Composite — 2× area (atlas) or 1 blit (direct), partial scales below.** Reading N sources once and
+  writing the output once is the irreducible minimum; the persistent atlas + partial updates mean only
+  *changed* tiles cost anything (≈10× on a sparse wall), and `outputScale` drops it further (≈scale²)
+  when the consumer shows the wall smaller than native.
+- **Per-frame CPU encode is the residual, and it's a non-bottleneck.** Profiling (`npm run bench:profile`)
+  shows the direct path is ~88–90% CPU command-encode, ~10% GPU — but at 25 tiles × 60 fps that's
+  ~0.54 ms/frame, ≈3% of one core. The per-tile binding cost is irreducible (instancing and Metal-3
+  bindless were both *built and measured* at 1.00× — the N-texture residency is the floor, not the
+  binding style).
+- **Receiver — readback-bound, swizzle offloaded.** `receiveFrame` is dominated by the GPU→CPU copy the
+  caller asked for; the BGRA→RGBA conversion is done on the GPU, and the sample texture is reused.
+
+Cumulative effect on a realistic sparse 16–25-window wall: **≈21–42× over the naive
+one-server-per-window baseline.** The render-side `deviceScaleFactor: 1` fix (§7) is, on a Retina
+display, a bigger single win than anything in the publish path — the publish path is <5% of the frame
+budget; the workflow is **render-bound**, not publish-bound.
+
+**The only two theoretical wins left — both blocked by Syphon's surface-ownership model:**
+
+1. **0-copy single-window publish.** Today single-window pays one copy because a Syphon server must
+   publish a surface *it* allocated. To reach zero copies you would publish Electron's own `IOSurface`
+   *as* the Syphon frame. Syphon has no API for advertising a foreign surface — even
+   `SyphonSubclassing`'s `newSurfaceForWidth` returns *the server's own* surface — and Electron won't
+   render OSR into a surface we supply. Blocked at **both** ends.
+2. **Promoting the faster `direct` backend to the default.** `direct` is 1.5–2× over `atlas` but stays
+   opt-in because it renders zero-copy into Syphon's *single* published surface, which a client can be
+   reading while the next frame overwrites it (the §7 keyed-mutex gap, structurally). Making it the
+   default would require tear-safe **double-buffering**, and `SyphonSubclassing.h` forecloses it:
+   `newSurfaceForWidth` returns *"an existing or new IOSurface sized for the given dimensions"* (one
+   cached surface per size — re-asking the same size returns the *same* surface) and `-publish`
+   advertises *that one surface*. There is no publish-by-surface call, so a server holds exactly one
+   surface at a time. `atlas` stays the safe default not by caution but by protocol.
+
+Both unlocks need the **same upstream change**: a Syphon API to publish a caller-owned / rotating set
+of `IOSurface`s (i.e. what Spout gets from its keyed-mutex shared texture on the Windows side), and/or
+Electron accepting an external render target. Until one of those exists, this library is at its
+measurable floor, and further local micro-optimization has been verified — repeatedly, by building the
+candidates and measuring 1.00× — to yield nothing.
+
+---
+
+## 11. Further reading
 
 **In this repo**
 - [`README.md`](README.md) — install, usage, packaging, the performance table.
