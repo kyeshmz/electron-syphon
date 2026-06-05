@@ -1357,6 +1357,11 @@ static Napi::Value BenchmarkScaling(const Napi::CallbackInfo &info) {
           opts.Has("dirtyPerFrame")
               ? MIN(n, (uint32_t)opts.Get("dirtyPerFrame").ToNumber().Uint32Value())
               : n;
+      // skipMask: diagnostic to attribute per-tile CPU cost. bit0=skip
+      // setViewport, bit1=skip setFragmentTexture, bit2=skip draw. (Renders
+      // incorrectly — measurement only.)
+      const uint32_t skipMask = opts.Has("skipMask")
+          ? (uint32_t)opts.Get("skipMask").ToNumber().Uint32Value() : 0;
       uint32_t base = 0;
       auto buildFrame = [&](BOOL doWait, uint32_t nDraw) {
         double cpu0 = NowMs();
@@ -1371,9 +1376,11 @@ static Napi::Value BenchmarkScaling(const Napi::CallbackInfo &info) {
         for (uint32_t j = 0; j < nDraw; j++) {
           uint32_t k = (base + j) % n;
           double cx = (k % cols) * tileW * oscale, cy = (k / cols) * tileH * oscale;
-          [enc setViewport:(MTLViewport){cx, cy, tileW * oscale, tileH * oscale, 0, 1}];
-          [enc setFragmentTexture:texs[k] atIndex:0];
-          [enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+          if (!(skipMask & 1))
+            [enc setViewport:(MTLViewport){cx, cy, tileW * oscale, tileH * oscale, 0, 1}];
+          if (!(skipMask & 2)) [enc setFragmentTexture:texs[k] atIndex:0];
+          if (!(skipMask & 4))
+            [enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
         }
         base = (base + nDraw) % n;
         [enc endEncoding];

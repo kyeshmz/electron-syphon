@@ -9,7 +9,7 @@ function run() {
     addon.benchmarkScaling({width:tileW,height:tileH,cols,rows,iterations:50,mode:'directflip',wait:false,flip:true}) //warm
     const r = addon.benchmarkScaling({width:tileW,height:tileH,cols,rows,iterations:iters,mode:'directflip',wait:false,flip:true})
     const cpu=r.cpuEncodeMsPerFrame, tot=r.avgMs
-    console.log(`${n}\t${tot.toFixed(3)}\t${cpu.toFixed(3)} (${(100*cpu/tot).toFixed(0)}%)\t${cpu/tot<0.3?'GPU-bound (floor)':'CPU-bound (instancing could help)'}`)
+    console.log(`${n}\t${tot.toFixed(3)}\t${cpu.toFixed(3)} (${(100*cpu/tot).toFixed(0)}%)\t${cpu/tot<0.3?'GPU-bound (floor)':'CPU-bound (N-texture binding — irreducible, measured)'}`)
   }
 }
 if (process.versions.electron){const {app}=require('electron');app.disableHardwareAcceleration();app.whenReady().then(run).then(()=>app.exit(0)).catch(e=>{console.error(e);app.exit(1)})}else run()
