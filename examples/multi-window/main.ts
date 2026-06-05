@@ -4,6 +4,14 @@
 //
 // For each i in 1..N we open a visible PREVIEW window (tiled in a grid) so you
 // can see source #i, plus a hidden OFFSCREEN window that is actually published.
+//
+// This demonstrates the ONE-SERVER-PER-WINDOW pattern — use it when a downstream
+// app needs to route each source independently. If instead you want all windows
+// as ONE combined output (a video wall / multiview), `CompositeSyphonOutput`
+// ({ direct: true }) is 1.5–10× faster: it composites every window into a single
+// Syphon server in one GPU pass, scales linearly past 25 windows where this
+// pattern's per-server cost falls off a cliff, and downscales near-free
+// (`outputScale`). See the README "Multiple outputs" section.
 import { app, BrowserWindow, screen } from 'electron'
 import { SyphonOutput, listServers } from 'electron-syphon'
 import * as path from 'path'
