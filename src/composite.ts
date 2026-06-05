@@ -122,6 +122,10 @@ export class CompositeSyphonOutput {
   // source texture around. A new paint before the next publish supersedes (and
   // releases) the previous un-blitted one.
   private readonly dirty: (Electron.OffscreenSharedTexture | null)[]
+  // The IOSurface handle for each dirty texture, extracted in onPaint (where we
+  // already read textureInfo for the isFrame check) so publish() doesn't read
+  // textureInfo a second time per tile. Same lifetime as dirty[idx].
+  private readonly dirtyHandle: (Buffer | null)[]
   // Pre-allocated tile object per slot (x/y/w/h are fixed by the grid layout;
   // only `handle` changes each frame) + a reused scratch array — avoids
   // allocating N objects and a new array on every publish (GC pressure at
@@ -159,6 +163,7 @@ export class CompositeSyphonOutput {
     this.flipY = opts.flipY ?? true
     const n = this.cols * this.rows
     this.dirty = new Array(n).fill(null)
+    this.dirtyHandle = new Array(n).fill(null)
     this.attached = new Array(n).fill(null)
     this.handlers = new Array(n)
     // Pre-build the per-slot tile objects with their fixed grid rects.
@@ -227,6 +232,7 @@ export class CompositeSyphonOutput {
     const cur = this.dirty[idx]
     if (cur) {
       this.dirty[idx] = null
+      this.dirtyHandle[idx] = null
       cur.release() // an un-blitted frame that will never be published
     }
   }
@@ -243,7 +249,13 @@ export class CompositeSyphonOutput {
     }
     const info = texture.textureInfo
     const isFrame = !info.widgetType || info.widgetType === 'frame'
-    if (!isFrame) {
+    // Extract the IOSurface handle here (we already have `info`) so publish()
+    // doesn't read textureInfo again. Field-name drift: <=38 had
+    // `sharedTextureHandle`; 39+ moved it to `handle.ioSurface`.
+    const handle: Buffer | undefined =
+      (info as { sharedTextureHandle?: Buffer }).sharedTextureHandle ??
+      (info as { handle?: { ioSurface?: Buffer } }).handle?.ioSurface
+    if (!isFrame || !handle) {
       texture.release()
       return
     }
@@ -251,6 +263,7 @@ export class CompositeSyphonOutput {
     // (it was never published, the atlas never saw it).
     const prev = this.dirty[idx]
     this.dirty[idx] = texture
+    this.dirtyHandle[idx] = handle
     if (prev) prev.release()
 
     if (this.coalesce) this.schedulePublish()
@@ -300,19 +313,10 @@ export class CompositeSyphonOutput {
     for (let idx = 0; idx < this.dirty.length; idx++) {
       const tex = this.dirty[idx]
       if (!tex) continue
-      const info = tex.textureInfo
-      const handle: Buffer | undefined =
-        (info as { sharedTextureHandle?: Buffer }).sharedTextureHandle ??
-        (info as { handle?: { ioSurface?: Buffer } }).handle?.ioSurface
-      if (!handle) {
-        // Unusable frame — drop it so it can't wedge the slot dirty forever.
-        this.dirty[idx] = null
-        tex.release()
-        continue
-      }
+      // Handle was extracted+validated in onPaint (no textureInfo read here).
       // Reuse the slot's pre-built tile object (x/y/w/h fixed); only handle changes.
       const slotTile = this.slotTiles[idx]
-      slotTile.handle = handle
+      slotTile.handle = this.dirtyHandle[idx]!
       tiles.push(slotTile)
       this.dirty[idx] = null // consumed: the atlas will hold its pixels
       batch.push(tex) // kept alive until this publish completes
