@@ -1315,11 +1315,17 @@ static Napi::Value BenchmarkScaling(const Napi::CallbackInfo &info) {
 
       __weak DirectSyphonServer *wsrv = srv;
       NSMutableArray<id<MTLCommandBuffer>> *flight = [NSMutableArray array];
+      // loadAction: 'load' preserves unchanged tiles (needed for partial
+      // updates); 'dontcare' skips reading the surface — valid when every pixel
+      // is overwritten this pass (full update), saving a whole-surface read.
+      const bool dontCare =
+          opts.Has("load") && opts.Get("load").ToString().Utf8Value() == "dontcare";
       auto buildFrame = [&](BOOL doWait) {
         id<MTLCommandBuffer> c = [q commandBuffer];
         MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
         rp.colorAttachments[0].texture = dst;
-        rp.colorAttachments[0].loadAction = MTLLoadActionLoad; // preserve unchanged tiles
+        rp.colorAttachments[0].loadAction =
+            dontCare ? MTLLoadActionDontCare : MTLLoadActionLoad;
         rp.colorAttachments[0].storeAction = MTLStoreActionStore;
         id<MTLRenderCommandEncoder> enc = [c renderCommandEncoderWithDescriptor:rp];
         [enc setRenderPipelineState:pso];
