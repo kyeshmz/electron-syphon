@@ -84,7 +84,7 @@ Measured (`npm run bench:scaling`, 1280×720 tiles, async) — time per *full-gr
 | 16 | 1.63 ms | 0.66 ms | **2.5×** |
 | 25 | 5.96 ms | 0.99 ms | **6.0×** |
 
-The per-server pattern's cost per tile grows and falls off a cliff (~0.2 ms/tile at 25 outputs — can no longer sustain the grid); the atlas stays flat (~0.04 ms/tile). Sources should render at `tileWidth × tileHeight` (larger frames are cropped to the tile).
+The per-server pattern's cost per tile grows and falls off a cliff (~0.2 ms/tile at 25 outputs — can no longer sustain the grid); the composite stays flat. Both composite backends scale **linearly with no cliff** well past where the per-server pattern breaks — measured to **64 tiles** (atlas ~0.02 ms/tile, `direct` ~0.008 ms/tile), so a 64-window wall composites in ~1.4 ms (atlas) or ~0.5 ms (`direct`). Sources should render at `tileWidth × tileHeight` (larger frames are cropped to the tile).
 
 `CompositeSyphonOutput` re-blits **only the tiles that changed** since the last frame — the atlas texture is persistent, so unchanged windows keep their last pixels for free. On a wall where few windows repaint per frame this is the dominant lever:
 
