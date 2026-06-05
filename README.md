@@ -46,7 +46,7 @@ win.loadURL(myVisualsUrl)
 
 - **Zero-copy** — `paint` hands main an **IOSurface handle**; we wrap it as a Metal texture and publish via `SyphonMetalServer`. No pixel crosses IPC; nothing is read back to the CPU.
 - **Prebuilt** — N-API binary (ABI-stable across Electron versions) + vendored `Syphon.framework`. `npm install` needs no Xcode.
-- **Fast** — ~0.13 ms/frame at 1080p (≈40× real-time @60 fps); 3–5× the CPU-readback approach.
+- **Fast** — ~0.13 ms/frame at 1080p (~125× real-time @60 fps); 3–5× the CPU-readback approach.
 
 ## Install
 
@@ -58,7 +58,7 @@ See [`INTEGRATION.md`](INTEGRATION.md) for step-by-step wiring and [`METHODOLOGY
 
 ## Tuning & multiple outputs
 
-Publish is ~0.06 ms/frame at 1080p, so what you pay scales with a few obvious knobs:
+Publish is ~0.13 ms/frame at 1080p (live, end-to-end), so what you pay scales with a few obvious knobs:
 
 - **Resolution** — render size *is* send size. Set it with `setResolution(w, h)` and create the window with `deviceScaleFactor: 1` so Retina doesn't quietly render 2×.
 - **Publish rate** — `maxPublishRate` caps how often frames reach Syphon without slowing the renderer. Syphon is fire-and-forget, so any frame the consumer never pulls is wasted.
