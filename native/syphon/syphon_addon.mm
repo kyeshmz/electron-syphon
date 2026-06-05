@@ -1290,6 +1290,7 @@ static Napi::Value BenchmarkScaling(const Napi::CallbackInfo &info) {
   }
 
   double total = 0.0;
+  double cpuEncodeMs = 0.0; // CPU command-encoding time (directflip diagnostic)
   @autoreleasepool {
     if (mode == "directflip") {
       // Like 'direct', but composites WITH a vertical flip in a single render
@@ -1358,6 +1359,7 @@ static Napi::Value BenchmarkScaling(const Napi::CallbackInfo &info) {
               : n;
       uint32_t base = 0;
       auto buildFrame = [&](BOOL doWait, uint32_t nDraw) {
+        double cpu0 = NowMs();
         id<MTLCommandBuffer> c = [q commandBuffer];
         MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
         rp.colorAttachments[0].texture = dst;
@@ -1377,10 +1379,12 @@ static Napi::Value BenchmarkScaling(const Napi::CallbackInfo &info) {
         [enc endEncoding];
         [c addCompletedHandler:^(id<MTLCommandBuffer> _Nonnull) { [wsrv publish]; }];
         [c commit];
+        cpuEncodeMs += NowMs() - cpu0; // CPU-side encode+commit (excludes GPU wait)
         if (doWait) [c waitUntilCompleted];
         else [flight addObject:c];
       };
       buildFrame(YES, n);
+      cpuEncodeMs = 0.0; // reset after warmup
       double t0 = NowMs();
       for (uint32_t i = 0; i < iterations; i++) {
         buildFrame(wait ? YES : NO, dirty);
@@ -1649,6 +1653,7 @@ static Napi::Value BenchmarkScaling(const Napi::CallbackInfo &info) {
   out.Set("flip", Napi::Boolean::New(env, flipped == YES));
   out.Set("totalMs", Napi::Number::New(env, total));
   out.Set("avgMs", Napi::Number::New(env, avg));
+  out.Set("cpuEncodeMsPerFrame", Napi::Number::New(env, cpuEncodeMs / iterations));
   out.Set("perTileMs", Napi::Number::New(env, perTile));
   out.Set("fps", Napi::Number::New(env, avg > 0 ? 1000.0 / avg : 0.0));
   out.Set("totalMegapixels", Napi::Number::New(env, mp));
