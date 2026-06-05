@@ -9,6 +9,7 @@
     "simple-window": "npm run build && electron dist/simple-window/main.js",
     "webgl": "npm run build && electron dist/webgl/main.js",
     "webgpu": "npm run build && electron dist/webgpu/main.js",
+    "p5js": "npm run build && electron dist/p5js/main.js",
     "multi-window": "npm run build && electron dist/multi-window/main.js",
     "composite-wall": "npm run build && electron dist/composite-wall/main.js",
     "frame-test": "npm run build && electron dist/frame-test/main.js",

@@ -7,6 +7,7 @@ examples/
   simple-window/    one window → one Syphon server (2D canvas)
   webgl/            a WebGL shader
   webgpu/           a WebGPU scene
+  p5js/             a p5.js sketch (flow field), vendored p5 — runs offline
   multi-window/     N windows → N Syphon servers at once
   composite-wall/   N windows → ONE Syphon server (a video wall, 1.5–10× faster)
   frame-test/       render → freeze → prove the SENT frame == the RECEIVED frame
@@ -38,6 +39,7 @@ npm install            # Electron + links electron-syphon from ../
 npm run simple-window
 npm run webgl
 npm run webgpu
+npm run p5js
 npm run multi-window   # N=8 npm run multi-window  to fan out further
 npm run composite-wall # N windows composited into ONE Syphon server (video wall); N=9 to grow the grid
 npm run frame-test     # render → freeze → verify the SENT frame == the RECEIVED frame
