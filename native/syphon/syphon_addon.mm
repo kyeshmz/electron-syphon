@@ -732,6 +732,10 @@ private:
   id<MTLTexture> readTex_ = nil;
   NSUInteger readW_ = 0, readH_ = 0;
   id<MTLRenderPipelineState> rgbaPso_ = nil; // BGRA-sample → RGBA-write + opaque α
+  // Reused N×N sample target for receive(true) — avoids a per-call texture alloc
+  // when the connection is polled in a loop.
+  id<MTLTexture> sampleTex_ = nil;
+  NSUInteger sampleN_ = 0;
 };
 
 // Compile (once) a pipeline that samples the received BGRA frame and writes it
@@ -790,6 +794,7 @@ SyphonClient::~SyphonClient() {
   }
   readTex_ = nil;
   rgbaPso_ = nil;
+  sampleTex_ = nil;
   queue_ = nil;
   device_ = nil;
 }
@@ -801,6 +806,7 @@ void SyphonClient::Dispose(const Napi::CallbackInfo &info) {
   }
   readTex_ = nil;
   rgbaPso_ = nil;
+  sampleTex_ = nil;
 }
 
 // Receive(sample?: boolean) →
@@ -832,13 +838,17 @@ Napi::Value SyphonClient::Receive(const Napi::CallbackInfo &info) {
       const NSUInteger N = (w >= 32 && h >= 32) ? 16 : 1;
       const NSUInteger ox = w / 3;
       const NSUInteger oy = h / 3;
-      MTLTextureDescriptor *d = [MTLTextureDescriptor
-          texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
-                                       width:N
-                                      height:N
-                                   mipmapped:NO];
-      d.storageMode = MTLStorageModeShared;
-      id<MTLTexture> dst = [device_ newTextureWithDescriptor:d];
+      if (!sampleTex_ || sampleN_ != N) { // reused across calls (size is fixed)
+        MTLTextureDescriptor *d = [MTLTextureDescriptor
+            texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                         width:N
+                                        height:N
+                                     mipmapped:NO];
+        d.storageMode = MTLStorageModeShared;
+        sampleTex_ = [device_ newTextureWithDescriptor:d];
+        sampleN_ = N;
+      }
+      id<MTLTexture> dst = sampleTex_;
       id<MTLCommandBuffer> cb = [queue_ commandBuffer];
       id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
       [blit copyFromTexture:tex
