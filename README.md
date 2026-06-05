@@ -95,6 +95,8 @@ The per-server pattern's cost per tile grows and falls off a cliff (~0.2 ms/tile
 
 Combined with the atlas (vs one server per window, all repainting), a sparsely-updating 25-window wall publishes ~11× faster. Call `republish()` to re-emit the current atlas to a client that connects to an otherwise-static wall.
 
+`CompositeSyphonOutput` also **coalesces** all paints that land in the same event-loop turn into a single atlas publish (on by default; set `coalesce = false` for an immediate publish per paint). Without it, N windows repainting in one tick would trigger N full-atlas publishes; with it, one. `npm run test:composite` drives 4 real offscreen windows through it end-to-end.
+
 `examples/full-demo/` shows every capture method side by side with live controls.
 
 ## Low-level API

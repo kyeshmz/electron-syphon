@@ -59,6 +59,14 @@ export class CompositeSyphonOutput {
   enabled = true
   /** Skip all GPU work when no Syphon client is attached (idle win). */
   skipWhenNoClients = true
+  /**
+   * Coalesce all paints that land in the same event-loop turn into ONE atlas
+   * publish (batching every dirty tile), instead of publishing once per paint.
+   * Without this, N windows repainting in a tick cause N full-atlas Syphon
+   * publishes when one suffices — the dominant cost at high window counts. On by
+   * default; set false for an immediate publish on every paint (lowest latency,
+   * highest overhead). */
+  coalesce = true
 
   /** Stats. */
   frames = 0
@@ -75,6 +83,8 @@ export class CompositeSyphonOutput {
   // Per-slot attached webContents + paint handler, for clean detach.
   private readonly attached: (WebContents | null)[]
   private readonly handlers: ((...args: never[]) => void)[]
+  // Set while a coalesced publish is queued for the end of this loop turn.
+  private publishQueued: ReturnType<typeof setImmediate> | null = null
 
   // Electron's shared-texture pool is 10 frames per webContents; keep the atlas
   // pipeline shallow so we never starve a source.
@@ -170,7 +180,19 @@ export class CompositeSyphonOutput {
     this.dirty[idx] = texture
     if (prev) prev.release()
 
-    this.publish()
+    if (this.coalesce) this.schedulePublish()
+    else this.publish()
+  }
+
+  // Queue one publish for the end of the current loop turn. Every paint that
+  // lands before it fires just marks its slot dirty; the single publish then
+  // batches them all into one atlas frame.
+  private schedulePublish(): void {
+    if (this.publishQueued) return
+    this.publishQueued = setImmediate(() => {
+      this.publishQueued = null
+      this.publish()
+    })
   }
 
   /**
@@ -280,6 +302,10 @@ export class CompositeSyphonOutput {
   }
 
   dispose(): void {
+    if (this.publishQueued) {
+      clearImmediate(this.publishQueued)
+      this.publishQueued = null
+    }
     for (let i = 0; i < this.dirty.length; i++) this.detachSlot(i)
     this.flushPending()
     this.server.dispose()

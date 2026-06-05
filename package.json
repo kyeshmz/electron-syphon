@@ -47,6 +47,7 @@
     "bench:scaling": "electron test/scaling-bench.js",
     "test": "node --expose-gc test/smoke.js",
     "test:atlas": "electron test/atlas-check.js && electron test/atlas-partial-check.js",
+    "test:composite": "npm run build:ts && electron test/composite-e2e.js",
     "test:e2e": "npm --prefix examples/full-demo test",
     "make-library": "bash scripts/build-library.sh",
     "prepack": "npm run build:ts",
