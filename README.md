@@ -114,6 +114,16 @@ Partial updates are where `direct` pulls furthest ahead: it has no separate full
 new CompositeSyphonOutput('Wall', { direct: true, cols: 5, rows: 5, outputScale: 0.5 })
 ```
 
+These levers **stack**. For a 16-window @720p wall where a couple of tiles change per frame and the wall is shown at half size (`npm run bench:cumulative`):
+
+| | per grid-frame | vs naive |
+|---|---:|---:|
+| naive — one server per window, all redrawn | 1.20 ms | 1× |
+| + atlas composite | 0.62 ms | 1.9× |
+| + `direct` zero-copy | 0.38 ms | 3.2× |
+| + partial (2 of 16 tiles change) | 0.069 ms | 17× |
+| + `outputScale: 0.5` | 0.057 ms | **21×** |
+
 If all your sources can live in **one** renderer, the fastest option is to render the grid in a single offscreen window (CSS layout) and publish it with `SyphonOutput` — Electron composites the cells for free and hands one IOSurface, skipping the per-tile blits entirely (the theoretical ceiling, ~2× over the atlas). Use `CompositeSyphonOutput` when sources need separate `webContents` (distinct origins, crash isolation); `npm run test:composite` exercises both.
 
 `examples/full-demo/` shows every capture method side by side with live controls.

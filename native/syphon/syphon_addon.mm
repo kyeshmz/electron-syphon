@@ -987,6 +987,9 @@ DirectServer::DirectServer(const Napi::CallbackInfo &info)
     if (!server_)
       Napi::Error::New(env, "DirectSyphonServer init failed")
           .ThrowAsJavaScriptException();
+    // Compile the composite shader now, not on the first publish — avoids a
+    // first-frame hitch on the hot path.
+    EnsurePipeline();
   }
 }
 
