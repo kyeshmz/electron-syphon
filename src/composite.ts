@@ -243,7 +243,12 @@ export class CompositeSyphonOutput {
   ): void {
     const texture = event.texture
     if (!texture) return // composite path requires shared textures; ignore CPU frames
-    if (!this.enabled || (this.skipWhenNoClients && !this.server.hasClients)) {
+    // Note: the `skipWhenNoClients` / `hasClients` check lives in publish() (once
+    // per frame), not here — onPaint runs once PER SOURCE per frame, so polling
+    // the native hasClients getter here was N redundant N-API crossings/frame.
+    // When idle, publish() skips the GPU work; a slot holds at most its latest
+    // unpublished texture (released on the next paint), bounded by the grid size.
+    if (!this.enabled) {
       texture.release()
       return
     }
@@ -302,7 +307,19 @@ export class CompositeSyphonOutput {
    */
   publish(): void {
     if (!this.enabled) return
-    if (this.skipWhenNoClients && !this.server.hasClients) return
+    if (this.skipWhenNoClients && !this.server.hasClients) {
+      // Idle: no client to receive. Release any dirty textures so onPaint's
+      // (now hasClients-free) stores don't hold frames while idle.
+      for (let idx = 0; idx < this.dirty.length; idx++) {
+        const tex = this.dirty[idx]
+        if (tex) {
+          this.dirty[idx] = null
+          this.dirtyHandle[idx] = null
+          tex.release()
+        }
+      }
+      return
+    }
 
     // Only re-blit slots whose source repainted since the last publish; the
     // persistent atlas keeps every other tile's last pixels. This is the 2.5–3×

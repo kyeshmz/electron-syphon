@@ -49,7 +49,7 @@
     "bench:profile": "electron test/profile-directflip.js",
     "test": "node --expose-gc test/smoke.js",
     "test:atlas": "electron test/atlas-check.js && electron test/atlas-partial-check.js && electron test/atlas-pingpong-check.js && electron test/direct-correctness.js && electron test/directflip-correctness.js && electron test/direct-partial-check.js && electron test/direct-scale-check.js && electron test/flip-layout-check.js && electron test/tearing-compare.js",
-    "test:composite": "npm run build:ts && electron test/composite-e2e.js && electron test/single-window-grid.js",
+    "test:composite": "npm run build:ts && electron test/composite-e2e.js && electron test/single-window-grid.js && electron test/composite-skipclients.js",
     "bench:load": "npm run build:ts && electron test/composite-load.js",
     "test:rate": "npm run build:ts && electron test/output-rate-load.js",
     "test:e2e": "npm --prefix examples/full-demo test",
