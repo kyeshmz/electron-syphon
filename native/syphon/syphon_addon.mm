@@ -939,10 +939,14 @@ public:
   ~DirectServer();
 
 private:
-  Napi::Value PublishTiles(const Napi::CallbackInfo &info);
+  Napi::Value PublishAtlas(const Napi::CallbackInfo &info);
+  Napi::Value Reap(const Napi::CallbackInfo &info);
+  Napi::Value Drain(const Napi::CallbackInfo &info);
   Napi::Value GetHasClients(const Napi::CallbackInfo &info);
+  Napi::Value GetName(const Napi::CallbackInfo &info);
   void Dispose(const Napi::CallbackInfo &info);
   id<MTLTexture> SourceTexture(IOSurfaceRef s);
+  uint32_t ReapInternal();
 
   id<MTLDevice> device_ = nil;
   id<MTLCommandQueue> queue_ = nil;
@@ -1010,8 +1014,13 @@ id<MTLTexture> DirectServer::SourceTexture(IOSurfaceRef s) {
   return t;
 }
 
-// publishTiles(tiles, w, h) → blit tiles into the server's surface, publish.
-Napi::Value DirectServer::PublishTiles(const Napi::CallbackInfo &info) {
+// publishAtlas(tiles, w, h, flipY, fullUpdate) — atlas-compatible signature so it
+// can stand in for SyphonServer in CompositeSyphonOutput. flipY/fullUpdate are
+// accepted but IGNORED: a blit can't mirror (direct is flipY=false), and there's
+// one persistent server surface (no ping-pong). Blits the tiles straight into the
+// server's published surface, publishes after GPU completion. Async: the caller
+// keeps each source texture alive until reap()/drain() reports the blit done.
+Napi::Value DirectServer::PublishAtlas(const Napi::CallbackInfo &info) {
   Napi::Env env = info.Env();
   if (!server_) return Napi::Number::New(env, 0);
   Napi::Array tiles = info[0].As<Napi::Array>();
@@ -1063,24 +1072,54 @@ Napi::Value DirectServer::PublishTiles(const Napi::CallbackInfo &info) {
     __weak DirectSyphonServer *wsrv = server_;
     [cmd addCompletedHandler:^(id<MTLCommandBuffer> _Nonnull) { [wsrv publish]; }];
     [cmd commit];
-    [inflight_ addObject:cmd];
-    while (inflight_.count > 0 &&
-           (inflight_[0].status == MTLCommandBufferStatusCompleted ||
-            inflight_[0].status == MTLCommandBufferStatusError))
-      [inflight_ removeObjectAtIndex:0];
+    [inflight_ addObject:cmd]; // released by reap()/drain() once the blit is done
   }
   return Napi::Number::New(env, 1);
+}
+
+uint32_t DirectServer::ReapInternal() {
+  uint32_t n = 0;
+  while (inflight_.count > 0) {
+    MTLCommandBufferStatus s = inflight_[0].status;
+    if (s == MTLCommandBufferStatusCompleted || s == MTLCommandBufferStatusError) {
+      [inflight_ removeObjectAtIndex:0];
+      n++;
+    } else {
+      break;
+    }
+  }
+  return n;
+}
+
+Napi::Value DirectServer::Reap(const Napi::CallbackInfo &info) {
+  return Napi::Number::New(info.Env(), ReapInternal());
+}
+
+Napi::Value DirectServer::Drain(const Napi::CallbackInfo &info) {
+  uint32_t n = (uint32_t)inflight_.count;
+  for (id<MTLCommandBuffer> c in inflight_) [c waitUntilCompleted];
+  [inflight_ removeAllObjects];
+  return Napi::Number::New(info.Env(), n);
 }
 
 Napi::Value DirectServer::GetHasClients(const Napi::CallbackInfo &info) {
   return Napi::Boolean::New(info.Env(), server_ ? server_.hasClients : false);
 }
 
+Napi::Value DirectServer::GetName(const Napi::CallbackInfo &info) {
+  if (!server_) return info.Env().Null();
+  return Napi::String::New(info.Env(),
+                           server_.name ? server_.name.UTF8String : "");
+}
+
 Napi::Object DirectServer::Init(Napi::Env env, Napi::Object exports) {
   Napi::Function func = DefineClass(
       env, "DirectServer",
       {
-          InstanceMethod("publishTiles", &DirectServer::PublishTiles),
+          InstanceMethod("publishAtlas", &DirectServer::PublishAtlas),
+          InstanceMethod("reap", &DirectServer::Reap),
+          InstanceMethod("drain", &DirectServer::Drain),
+          InstanceAccessor("name", &DirectServer::GetName, nullptr),
           InstanceMethod("dispose", &DirectServer::Dispose),
           InstanceAccessor("hasClients", &DirectServer::GetHasClients, nullptr),
       });

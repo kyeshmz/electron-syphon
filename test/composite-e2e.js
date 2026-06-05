@@ -15,7 +15,7 @@ const page = (c) => 'data:text/html,' + encodeURIComponent(
 
 app.whenReady().then(async () => {
   const TW = 640, TH = 360
-  const out = new CompositeSyphonOutput('composite-e2e', { cols: 2, rows: 2, tileWidth: TW, tileHeight: TH })
+  const out = new CompositeSyphonOutput('composite-e2e', { cols: 2, rows: 2, tileWidth: TW, tileHeight: TH, direct: process.env.DIRECT === '1' })
   out.skipWhenNoClients = false // publish even before a client attaches
   out.maxPublishRate = Number(process.env.CAP || 0)
 

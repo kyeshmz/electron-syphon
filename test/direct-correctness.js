@@ -13,7 +13,7 @@ async function run() {
   const mk=(r,g,b)=>addon.__makeTestSurface(TW,TH,r,g,b)
   const grid=[[255,0,0],[0,255,0],[0,0,255],[255,255,0]]
   const tiles=grid.map((c,i)=>({handle:mk(...c),x:(i%2)*TW,y:((i/2)|0)*TH}))
-  for(let i=0;i<6;i++){srv.publishTiles(tiles,AW,AH);await sleep(15)}
+  for(let i=0;i<6;i++){srv.publishAtlas(tiles,AW,AH, false, true); srv.reap();await sleep(15)}
 
   let client=null
   for(let t=0;t<60&&!client;t++){if(addon.listServers().some(s=>s.name===NAME))client=new addon.SyphonClient(NAME);if(!client||!client.isValid){client=null;await sleep(100)}}
@@ -21,7 +21,7 @@ async function run() {
 
   // (1) quadrant correctness
   let frame=null
-  for(let i=0;i<80&&!frame;i++){srv.publishTiles(tiles,AW,AH);const f=client.receiveFrame();if(f.hasFrame&&f.pixels)frame=f;else await sleep(20)}
+  for(let i=0;i<80&&!frame;i++){srv.publishAtlas(tiles,AW,AH, false, true); srv.reap();const f=client.receiveFrame();if(f.hasFrame&&f.pixels)frame=f;else await sleep(20)}
   if(!frame){console.error('FAIL: no frame');process.exitCode=1;return}
   const near=(a,b)=>Math.abs(a-b)<=12
   {const {width:w,pixels}=frame;const at=(x,y)=>{const i=(y*w+x)*4;return[pixels[i],pixels[i+1],pixels[i+2]]}
@@ -35,7 +35,7 @@ async function run() {
   const blue=Array.from({length:4},(_,i)=>({handle:mk(0,0,255),x:(i%2)*TW,y:((i/2)|0)*TH}))
   let frames=0, torn=0
   for(let rep=0; rep<500; rep++){
-    srv.publishTiles(rep%2?blue:red, AW, AH)
+    srv.publishAtlas(rep%2?blue:red, AW, AH, false, true); srv.reap()
     const f=client.receiveFrame()
     if(f.hasFrame&&f.pixels){
       const {width:w,pixels}=f;const cls=(x,y)=>{const i=(y*w+x)*4;return pixels[i]>pixels[i+2]?'R':(pixels[i+2]>pixels[i]?'B':'?')}

@@ -1,5 +1,14 @@
 import type { WebContents, Rectangle, NativeImage } from 'electron'
-import { SyphonServer, type NativeSyphonServer } from './native'
+import { SyphonServer, DirectServer, type NativeSyphonServer, type NativeDirectServer } from './native'
+
+// The two methods CompositeSyphonOutput drives on its backend. Both
+// NativeSyphonServer (atlas path) and NativeDirectServer (zero-copy path) satisfy
+// this, so the backend is interchangeable.
+type CompositeBackend = Pick<
+  NativeSyphonServer,
+  'publishAtlas' | 'reap' | 'drain' | 'dispose' | 'name' | 'hasClients'
+>
+void (null as unknown as NativeDirectServer satisfies CompositeBackend)
 
 /** One cell of the composite grid. */
 export interface CompositeSlot {
@@ -19,8 +28,16 @@ export interface CompositeOptions {
   /** Pixel height of each tile. Default 720. */
   tileHeight?: number
   /** Flip the published atlas vertically (Electron OSR is top-left origin; many
-   *  Syphon clients expect bottom-left). Default true. */
+   *  Syphon clients expect bottom-left). Default true. Forced false when
+   *  `direct` is set. */
   flipY?: boolean
+  /**
+   * EXPERIMENTAL zero-copy backend: blit tiles straight into Syphon's published
+   * surface instead of into an intermediate atlas that Syphon then copies — ~1.3–
+   * 1.4× faster for a tiled wall. Requires **pre-oriented content** (`flipY` is
+   * forced `false`; a blit can't mirror) and publishes one persistent surface
+   * (same tear-under-load profile as any Syphon server). Default false. */
+  direct?: boolean
 }
 
 // The atlas blit COPIES each source into a PERSISTENT atlas texture, so once a
@@ -47,7 +64,9 @@ export interface CompositeOptions {
  * the main process; pixels never cross IPC and are never read back to the CPU.
  */
 export class CompositeSyphonOutput {
-  private readonly server: NativeSyphonServer
+  private readonly server: CompositeBackend
+  /** Whether the zero-copy direct backend is in use (implies flipY = false). */
+  readonly direct: boolean
   readonly cols: number
   readonly rows: number
   readonly tileWidth: number
@@ -103,12 +122,14 @@ export class CompositeSyphonOutput {
   private readonly maxInFlight = 6
 
   constructor(name: string, opts: CompositeOptions = {}) {
-    this.server = new SyphonServer(name)
+    this.direct = opts.direct ?? false
+    this.server = this.direct ? new DirectServer(name) : new SyphonServer(name)
     this.cols = Math.max(1, Math.floor(opts.cols ?? 2))
     this.rows = Math.max(1, Math.floor(opts.rows ?? 2))
     this.tileWidth = Math.max(1, Math.floor(opts.tileWidth ?? 1280))
     this.tileHeight = Math.max(1, Math.floor(opts.tileHeight ?? 720))
-    this.flipY = opts.flipY ?? true
+    // The direct backend can't flip (a blit can't mirror) → force flipY off.
+    this.flipY = this.direct ? false : (opts.flipY ?? true)
     const n = this.cols * this.rows
     this.dirty = new Array(n).fill(null)
     this.attached = new Array(n).fill(null)
@@ -331,8 +352,9 @@ export class CompositeSyphonOutput {
     return this.server.hasClients
   }
 
-  /** The underlying native server (for `benchmark()`, etc.). */
-  get native(): NativeSyphonServer {
+  /** The underlying native backend — a `NativeSyphonServer` (atlas path) or
+   *  `NativeDirectServer` (when `direct`). */
+  get native(): CompositeBackend {
     return this.server
   }
 

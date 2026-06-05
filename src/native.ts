@@ -98,9 +98,42 @@ export interface NativeSyphonClient {
   readonly hasNewFrame: boolean
 }
 
+/**
+ * EXPERIMENTAL zero-copy composite server (macOS). Blits source tiles straight
+ * into Syphon's own published IOSurface (via the SyphonSubclassing API) and
+ * advertises it — skipping the internal copy a normal server makes of your
+ * texture. ~1.3–1.4× faster than the atlas path for a tiled wall. It has the
+ * subset of {@link NativeSyphonServer} that {@link CompositeSyphonOutput} needs,
+ * so it can stand in as that class's backend.
+ *
+ * Constraints: a blit cannot mirror, so this is **flipY = false only** (sources
+ * must be pre-oriented); and it advertises one persistent surface (same
+ * tear-under-load characteristics as any Syphon server — no keyed mutex).
+ */
+export interface NativeDirectServer {
+  /** Atlas-compatible: (tiles, atlasW, atlasH, flipY, fullUpdate). flipY and
+   *  fullUpdate are accepted for signature parity but ignored. Returns 1 if a
+   *  frame was enqueued (keep the source textures alive until reap()), else 0. */
+  publishAtlas(
+    tiles: { handle: Buffer; x: number; y: number; w: number; h: number }[],
+    atlasWidth: number,
+    atlasHeight: number,
+    flipY?: boolean,
+    fullUpdate?: boolean
+  ): number
+  /** How many enqueued frames finished on the GPU since last call (drops them). */
+  reap(): number
+  /** Wait for all in-flight frames; returns how many were drained. */
+  drain(): number
+  dispose(): void
+  readonly name: string | null
+  readonly hasClients: boolean
+}
+
 interface NativeAddon {
   SyphonServer: new (name: string) => NativeSyphonServer
   SyphonClient: new (serverName: string) => NativeSyphonClient
+  DirectServer: new (name: string) => NativeDirectServer
   listServers(): SyphonServerInfo[]
 }
 
@@ -116,6 +149,9 @@ export const SyphonServer = addon.SyphonServer
 
 /** Syphon receiver — connect to a server by name and pull/verify frames. */
 export const SyphonClient = addon.SyphonClient
+
+/** EXPERIMENTAL zero-copy composite server. See {@link NativeDirectServer}. */
+export const DirectServer = addon.DirectServer
 
 /** Every Syphon server currently published on this machine. */
 export function listServers(): SyphonServerInfo[] {
