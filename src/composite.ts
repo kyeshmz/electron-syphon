@@ -67,10 +67,22 @@ export class CompositeSyphonOutput {
    * default; set false for an immediate publish on every paint (lowest latency,
    * highest overhead). */
   coalesce = true
+  /**
+   * Cap the publish rate (frames/sec). Each atlas publish is a full-area Syphon
+   * copy — the dominant bandwidth cost — but Syphon is fire-and-forget, so any
+   * frame a client never samples is wasted work. When N sources animate at 60fps
+   * the pipeline would otherwise publish far more often than any consumer pulls
+   * (e.g. ~250/s for 9 windows). Set this to your consumer's rate (e.g. 60) to
+   * accumulate dirty tiles between publishes and emit at most this many full
+   * frames per second — same visible result, a fraction of the GPU/bandwidth/
+   * power. 0 = uncapped (publish as soon as a paint lands, coalesced per turn). */
+  maxPublishRate = 0
 
   /** Stats. */
   frames = 0
   lastFrameAt = 0
+  private lastPublishAt = 0
+  private rateTimer: ReturnType<typeof setTimeout> | null = null
 
   // Latest UN-BLITTED frame per slot ("dirty"). Once blitted into the atlas the
   // slot goes back to null — the atlas holds the pixels, so we don't keep the
@@ -188,6 +200,20 @@ export class CompositeSyphonOutput {
   // lands before it fires just marks its slot dirty; the single publish then
   // batches them all into one atlas frame.
   private schedulePublish(): void {
+    if (this.maxPublishRate > 0) {
+      // Rate-capped: one publish is scheduled at a time; paints arriving before
+      // it fires just accumulate dirty tiles, so we emit at most maxPublishRate
+      // full frames/sec (and batch more tiles per publish).
+      if (this.rateTimer) return
+      const minInterval = 1000 / this.maxPublishRate
+      const wait = Math.max(0, this.lastPublishAt + minInterval - Date.now())
+      this.rateTimer = setTimeout(() => {
+        this.rateTimer = null
+        this.lastPublishAt = Date.now()
+        this.publish()
+      }, wait)
+      return
+    }
     if (this.publishQueued) return
     this.publishQueued = setImmediate(() => {
       this.publishQueued = null
@@ -314,6 +340,10 @@ export class CompositeSyphonOutput {
     if (this.publishQueued) {
       clearImmediate(this.publishQueued)
       this.publishQueued = null
+    }
+    if (this.rateTimer) {
+      clearTimeout(this.rateTimer)
+      this.rateTimer = null
     }
     for (let i = 0; i < this.dirty.length; i++) this.detachSlot(i)
     this.flushPending()

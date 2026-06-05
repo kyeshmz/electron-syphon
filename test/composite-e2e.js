@@ -17,6 +17,7 @@ app.whenReady().then(async () => {
   const TW = 640, TH = 360
   const out = new CompositeSyphonOutput('composite-e2e', { cols: 2, rows: 2, tileWidth: TW, tileHeight: TH })
   out.skipWhenNoClients = false // publish even before a client attaches
+  out.maxPublishRate = Number(process.env.CAP || 0)
 
   let paints = 0
   const wins = []
