@@ -32,11 +32,15 @@ export interface CompositeOptions {
    *  `direct` is set. */
   flipY?: boolean
   /**
-   * EXPERIMENTAL zero-copy backend: blit tiles straight into Syphon's published
-   * surface instead of into an intermediate atlas that Syphon then copies — ~1.3–
-   * 1.4× faster for a tiled wall. Requires **pre-oriented content** (`flipY` is
-   * forced `false`; a blit can't mirror) and publishes one persistent surface
-   * (same tear-under-load profile as any Syphon server). Default false. */
+   * EXPERIMENTAL zero-copy backend: composite tiles in one render pass straight
+   * into Syphon's published surface (via the `SyphonSubclassing` API) instead of
+   * into an intermediate atlas that Syphon then copies. One pass instead of two —
+   * ~1.3–1.4× faster than the atlas backend for `flipY = false`, and ~1.5–2×
+   * faster for `flipY = true` (the atlas path flips via a separate Syphon copy).
+   * Supports both orientations; note the flip is **per-tile** (each source is
+   * mirrored in place, grid layout preserved) rather than the atlas backend's
+   * whole-surface flip. Publishes one persistent surface (same tear-under-load
+   * profile as any Syphon server). Default false. */
   direct?: boolean
 }
 
@@ -65,7 +69,7 @@ export interface CompositeOptions {
  */
 export class CompositeSyphonOutput {
   private readonly server: CompositeBackend
-  /** Whether the zero-copy direct backend is in use (implies flipY = false). */
+  /** Whether the zero-copy direct backend is in use (per-tile flip; ~1.3–2×). */
   readonly direct: boolean
   readonly cols: number
   readonly rows: number
@@ -128,8 +132,7 @@ export class CompositeSyphonOutput {
     this.rows = Math.max(1, Math.floor(opts.rows ?? 2))
     this.tileWidth = Math.max(1, Math.floor(opts.tileWidth ?? 1280))
     this.tileHeight = Math.max(1, Math.floor(opts.tileHeight ?? 720))
-    // The direct backend can't flip (a blit can't mirror) → force flipY off.
-    this.flipY = this.direct ? false : (opts.flipY ?? true)
+    this.flipY = opts.flipY ?? true
     const n = this.cols * this.rows
     this.dirty = new Array(n).fill(null)
     this.attached = new Array(n).fill(null)

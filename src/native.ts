@@ -99,21 +99,23 @@ export interface NativeSyphonClient {
 }
 
 /**
- * EXPERIMENTAL zero-copy composite server (macOS). Blits source tiles straight
- * into Syphon's own published IOSurface (via the SyphonSubclassing API) and
- * advertises it — skipping the internal copy a normal server makes of your
- * texture. ~1.3–1.4× faster than the atlas path for a tiled wall. It has the
- * subset of {@link NativeSyphonServer} that {@link CompositeSyphonOutput} needs,
- * so it can stand in as that class's backend.
+ * EXPERIMENTAL zero-copy composite server (macOS). Composites source tiles in one
+ * render pass straight into Syphon's own published IOSurface (via the
+ * SyphonSubclassing API) and advertises it — skipping the internal copy a normal
+ * server makes of your texture. ~1.3–1.4× faster than the atlas path for
+ * flipY=false, ~1.5–2× for flipY=true. It has the subset of
+ * {@link NativeSyphonServer} that {@link CompositeSyphonOutput} needs, so it can
+ * stand in as that class's backend.
  *
- * Constraints: a blit cannot mirror, so this is **flipY = false only** (sources
- * must be pre-oriented); and it advertises one persistent surface (same
- * tear-under-load characteristics as any Syphon server — no keyed mutex).
+ * Notes: the flip is applied per-tile (each source mirrored in place); it
+ * advertises one persistent surface (same tear-under-load characteristics as any
+ * Syphon server — no keyed mutex).
  */
 export interface NativeDirectServer {
-  /** Atlas-compatible: (tiles, atlasW, atlasH, flipY, fullUpdate). flipY and
-   *  fullUpdate are accepted for signature parity but ignored. Returns 1 if a
-   *  frame was enqueued (keep the source textures alive until reap()), else 0. */
+  /** Atlas-compatible: (tiles, atlasW, atlasH, flipY, fullUpdate). flipY is
+   *  honored (per-tile vertical flip); fullUpdate is accepted for parity but
+   *  ignored. Returns 1 if a frame was enqueued (keep the source textures alive
+   *  until reap()), else 0. */
   publishAtlas(
     tiles: { handle: Buffer; x: number; y: number; w: number; h: number }[],
     atlasWidth: number,

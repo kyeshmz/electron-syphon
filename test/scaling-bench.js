@@ -7,14 +7,15 @@ function run() {
   console.log('outputs\ttotalMP\tmode     \tframeMs\tperTileMs\tgridFps')
   for (const [cols, rows] of GRIDS) {
     const res = {}
-    for (const mode of ['multi','atlas','direct','composite']) {
+    for (const mode of ['multi','atlas','direct','directflip','composite']) {
       const r = addon.benchmarkScaling({ width: tileW, height: tileH, cols, rows, iterations: iters, mode, wait: false, flip: true })
       res[mode] = r
-      console.log(`${r.outputs}\t${r.totalMegapixels.toFixed(1)}\t${mode.padEnd(9)}\t${r.avgMs.toFixed(3)}\t${r.perTileMs.toFixed(4)}\t${r.fps.toFixed(0)}`)
+      console.log(`${r.outputs}\t${r.totalMegapixels.toFixed(1)}\t${mode.padEnd(10)}\t${r.avgMs.toFixed(3)}\t${r.perTileMs.toFixed(4)}\t${r.fps.toFixed(0)}`)
     }
-    // 'direct' = zero-copy: blit tiles straight into the server's published
-    // IOSurface (SyphonSubclassing), skipping Syphon's internal copy. flipY=false.
-    console.log(`\t\t→ atlas ${(res.multi.avgMs/res.atlas.avgMs).toFixed(2)}x over multi; direct ${(res.atlas.avgMs/res.direct.avgMs).toFixed(2)}x over atlas; composite(ceiling) ${(res.multi.avgMs/res.composite.avgMs).toFixed(2)}x\n`)
+    // 'direct'/'directflip' = zero-copy: composite tiles straight into the
+    // server's published IOSurface (SyphonSubclassing), one pass instead of two.
+    // direct = flipY=false (blit); directflip = flipY=true (render-pass flip).
+    console.log(`\t\t→ atlas ${(res.multi.avgMs/res.atlas.avgMs).toFixed(2)}x over multi; direct ${(res.atlas.avgMs/res.direct.avgMs).toFixed(2)}x & directflip ${(res.atlas.avgMs/res.directflip.avgMs).toFixed(2)}x over atlas; composite(ceiling) ${(res.multi.avgMs/res.composite.avgMs).toFixed(2)}x\n`)
   }
 
   // Partial-update win: the persistent atlas re-blits only the tiles that

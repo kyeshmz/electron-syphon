@@ -947,12 +947,14 @@ private:
   void Dispose(const Napi::CallbackInfo &info);
   id<MTLTexture> SourceTexture(IOSurfaceRef s);
   uint32_t ReapInternal();
+  bool EnsurePipeline();
 
   id<MTLDevice> device_ = nil;
   id<MTLCommandQueue> queue_ = nil;
+  id<MTLRenderPipelineState> pso_ = nil; // composite-with-optional-flip shader
   DirectSyphonServer *server_ = nil;
   IOSurfaceRef pub_ = nullptr;     // the server's published surface
-  id<MTLTexture> pubTex_ = nil;    // pub_ wrapped for blitting
+  id<MTLTexture> pubTex_ = nil;    // pub_ wrapped as a render target
   NSUInteger pubW_ = 0, pubH_ = 0;
   NSMutableDictionary<NSNumber *, id<MTLTexture>> *srcTex_ = nil;
   NSMutableArray<id<MTLCommandBuffer>> *inflight_ = nil;
@@ -981,6 +983,7 @@ DirectServer::~DirectServer() {
   if (pub_) CFRelease(pub_);
   pub_ = nullptr;
   pubTex_ = nil;
+  pso_ = nil;
   srcTex_ = nil;
   inflight_ = nil;
   server_ = nil;
@@ -1014,33 +1017,81 @@ id<MTLTexture> DirectServer::SourceTexture(IOSurfaceRef s) {
   return t;
 }
 
+// Compile the composite shader once: a per-tile textured quad, with optional
+// vertical flip selected by a vertex uniform (so the zero-copy path serves both
+// flipY=false and flipY=true). Measured FASTER than the blit path too — one
+// render encoder with cheap viewport switches beats N separate blit calls.
+bool DirectServer::EnsurePipeline() {
+  if (pso_) return true;
+  NSError *err = nil;
+  NSString *msl =
+      @"#include <metal_stdlib>\n using namespace metal;\n"
+      @"struct VOut { float4 pos [[position]]; float2 uv; };\n"
+      @"vertex VOut vmain(uint vid [[vertex_id]], constant uint& flip [[buffer(0)]]) {\n"
+      @"  float2 p[4] = { float2(-1,-1), float2(1,-1), float2(-1,1), float2(1,1) };\n"
+      // Metal framebuffer y is top-down and NDC +y maps to the viewport top, so
+      // 'pass' (source unchanged, flipY=false) pairs viewport-top with v=0, and
+      // 'flip' (flipY=true) pairs viewport-top with v=1.
+      @"  float2 pass[4] = { float2(0,1), float2(1,1), float2(0,0), float2(1,0) };\n"
+      @"  float2 flp[4]  = { float2(0,0), float2(1,0), float2(0,1), float2(1,1) };\n"
+      @"  VOut o; o.pos = float4(p[vid],0,1); o.uv = flip ? flp[vid] : pass[vid]; return o; }\n"
+      @"fragment float4 fmain(VOut in [[stage_in]], texture2d<float> t [[texture(0)]]) {\n"
+      @"  constexpr sampler s(filter::nearest); return t.sample(s, in.uv); }\n";
+  id<MTLLibrary> lib = [device_ newLibraryWithSource:msl options:nil error:&err];
+  if (!lib) return false;
+  MTLRenderPipelineDescriptor *pd = [[MTLRenderPipelineDescriptor alloc] init];
+  pd.vertexFunction = [lib newFunctionWithName:@"vmain"];
+  pd.fragmentFunction = [lib newFunctionWithName:@"fmain"];
+  pd.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+  pso_ = [device_ newRenderPipelineStateWithDescriptor:pd error:&err];
+  return pso_ != nil;
+}
+
 // publishAtlas(tiles, w, h, flipY, fullUpdate) — atlas-compatible signature so it
-// can stand in for SyphonServer in CompositeSyphonOutput. flipY/fullUpdate are
-// accepted but IGNORED: a blit can't mirror (direct is flipY=false), and there's
-// one persistent server surface (no ping-pong). Blits the tiles straight into the
-// server's published surface, publishes after GPU completion. Async: the caller
-// keeps each source texture alive until reap()/drain() reports the blit done.
+// can stand in for SyphonServer in CompositeSyphonOutput. Composites the tiles
+// (each flipped in place when flipY) in ONE render pass straight into the
+// server's published surface, then -publish after GPU completion. loadAction=Load
+// preserves unchanged tiles, so partial updates work. fullUpdate is ignored (one
+// persistent surface, no ping-pong). Async: the caller keeps each source texture
+// alive until reap()/drain() reports the pass done.
 Napi::Value DirectServer::PublishAtlas(const Napi::CallbackInfo &info) {
   Napi::Env env = info.Env();
   if (!server_) return Napi::Number::New(env, 0);
   Napi::Array tiles = info[0].As<Napi::Array>();
   const NSUInteger w = info[1].As<Napi::Number>().Uint32Value();
   const NSUInteger h = info[2].As<Napi::Number>().Uint32Value();
+  const BOOL flip = (info.Length() > 3 && info[3].IsBoolean())
+                        ? info[3].As<Napi::Boolean>().Value() : NO;
   if (w == 0 || h == 0) return Napi::Number::New(env, 0);
+  if (!EnsurePipeline()) return Napi::Number::New(env, 0);
 
   @autoreleasepool {
     if (!pub_ || pubW_ != w || pubH_ != h) {
       if (pub_) CFRelease(pub_);
       pub_ = [server_ newSurfaceForWidth:w height:h options:nil]; // returns +1
       if (!pub_) return Napi::Number::New(env, 0);
-      pubTex_ = WrapSurface(device_, pub_, w, h);
+      MTLTextureDescriptor *rd = [MTLTextureDescriptor
+          texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                       width:w height:h mipmapped:NO];
+      rd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+      rd.storageMode = MTLStorageModeShared;
+      pubTex_ = [device_ newTextureWithDescriptor:rd iosurface:pub_ plane:0];
       pubW_ = w; pubH_ = h;
     }
     if (!pubTex_) return Napi::Number::New(env, 0);
 
     id<MTLCommandBuffer> cmd = [queue_ commandBuffer];
-    id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
-    uint32_t count = tiles.Length(), blitted = 0;
+    MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+    rp.colorAttachments[0].texture = pubTex_;
+    rp.colorAttachments[0].loadAction = MTLLoadActionLoad; // keep unchanged tiles
+    rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+    id<MTLRenderCommandEncoder> enc =
+        [cmd renderCommandEncoderWithDescriptor:rp];
+    [enc setRenderPipelineState:pso_];
+    uint32_t flipU = flip ? 1u : 0u;
+    [enc setVertexBytes:&flipU length:sizeof(flipU) atIndex:0];
+
+    uint32_t count = tiles.Length(), drawn = 0;
     for (uint32_t i = 0; i < count; i++) {
       Napi::Value tv = tiles[i];
       if (!tv.IsObject()) continue;
@@ -1055,24 +1106,24 @@ Napi::Value DirectServer::PublishAtlas(const Napi::CallbackInfo &info) {
       if (!src) continue;
       NSUInteger dx = tile.Has("x") ? tile.Get("x").ToNumber().Uint32Value() : 0;
       NSUInteger dy = tile.Has("y") ? tile.Get("y").ToNumber().Uint32Value() : 0;
-      NSUInteger cw = MIN(src.width, w - MIN(dx, w));
-      NSUInteger ch = MIN(src.height, h - MIN(dy, h));
+      NSUInteger cw = tile.Has("w") ? tile.Get("w").ToNumber().Uint32Value() : src.width;
+      NSUInteger ch = tile.Has("h") ? tile.Get("h").ToNumber().Uint32Value() : src.height;
+      if (dx >= w || dy >= h) continue;
+      cw = MIN(cw, w - dx);
+      ch = MIN(ch, h - dy);
       if (cw == 0 || ch == 0) continue;
-      [blit copyFromTexture:src
-                sourceSlice:0 sourceLevel:0
-               sourceOrigin:MTLOriginMake(0, 0, 0)
-                 sourceSize:MTLSizeMake(cw, ch, 1)
-                  toTexture:pubTex_
-           destinationSlice:0 destinationLevel:0
-          destinationOrigin:MTLOriginMake(dx, dy, 0)];
-      blitted++;
+      [enc setViewport:(MTLViewport){(double)dx, (double)dy, (double)cw,
+                                     (double)ch, 0.0, 1.0}];
+      [enc setFragmentTexture:src atIndex:0];
+      [enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+      drawn++;
     }
-    [blit endEncoding];
-    if (blitted == 0) { [cmd commit]; return Napi::Number::New(env, 0); }
+    [enc endEncoding];
+    if (drawn == 0) { [cmd commit]; return Napi::Number::New(env, 0); }
     __weak DirectSyphonServer *wsrv = server_;
     [cmd addCompletedHandler:^(id<MTLCommandBuffer> _Nonnull) { [wsrv publish]; }];
     [cmd commit];
-    [inflight_ addObject:cmd]; // released by reap()/drain() once the blit is done
+    [inflight_ addObject:cmd]; // released by reap()/drain() once the pass is done
   }
   return Napi::Number::New(env, 1);
 }
@@ -1218,7 +1269,89 @@ static Napi::Value BenchmarkScaling(const Napi::CallbackInfo &info) {
 
   double total = 0.0;
   @autoreleasepool {
-    if (mode == "direct") {
+    if (mode == "directflip") {
+      // Like 'direct', but composites WITH a vertical flip in a single render
+      // pass straight into the server's surface — so the zero-copy path can serve
+      // flipY=true. Compare vs 'atlas' (which flips via Syphon's separate copy):
+      // this is one pass (~2x area) vs atlas-flipped's two (~4x area).
+      const NSUInteger aw = tileW * cols, ah = tileH * rows;
+      std::vector<IOSurfaceRef> surfs(n, nullptr);
+      std::vector<id<MTLTexture>> texs(n, nil);
+      for (uint32_t k = 0; k < n; k++) {
+        surfs[k] = MakeFilledSurface(tileW, tileH);
+        texs[k] = WrapSurface(dev, surfs[k], tileW, tileH);
+      }
+      id<MTLCommandQueue> q = [dev newCommandQueue];
+      DirectSyphonServer *srv =
+          [[DirectSyphonServer alloc] initWithName:@"scaling-directflip" options:nil];
+      IOSurfaceRef pub = [srv newSurfaceForWidth:aw height:ah options:nil];
+      if (!pub) { Napi::Error::New(env, "newSurfaceForWidth failed").ThrowAsJavaScriptException(); return env.Null(); }
+      // Render target view of the server surface (BGRA8 color attachment).
+      MTLTextureDescriptor *rd = [MTLTextureDescriptor
+          texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                       width:aw height:ah mipmapped:NO];
+      rd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+      rd.storageMode = MTLStorageModeShared;
+      id<MTLTexture> dst = [dev newTextureWithDescriptor:rd iosurface:pub plane:0];
+
+      NSError *err = nil;
+      NSString *msl =
+          @"#include <metal_stdlib>\n using namespace metal;\n"
+          @"struct VOut { float4 pos [[position]]; float2 uv; };\n"
+          @"vertex VOut vmain(uint vid [[vertex_id]]) {\n"
+          @"  float2 p[4] = { float2(-1,-1), float2(1,-1), float2(-1,1), float2(1,1) };\n"
+          @"  float2 uv[4] = { float2(0,1), float2(1,1), float2(0,0), float2(1,0) };\n" // V flipped
+          @"  VOut o; o.pos = float4(p[vid],0,1); o.uv = uv[vid]; return o; }\n"
+          @"fragment float4 fmain(VOut in [[stage_in]], texture2d<float> t [[texture(0)]]) {\n"
+          @"  constexpr sampler s(filter::nearest); return t.sample(s, in.uv); }\n";
+      id<MTLLibrary> lib = [dev newLibraryWithSource:msl options:nil error:&err];
+      if (!lib) { Napi::Error::New(env, "shader compile failed").ThrowAsJavaScriptException(); return env.Null(); }
+      MTLRenderPipelineDescriptor *pd = [[MTLRenderPipelineDescriptor alloc] init];
+      pd.vertexFunction = [lib newFunctionWithName:@"vmain"];
+      pd.fragmentFunction = [lib newFunctionWithName:@"fmain"];
+      pd.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+      id<MTLRenderPipelineState> pso = [dev newRenderPipelineStateWithDescriptor:pd error:&err];
+      if (!pso) { Napi::Error::New(env, "pipeline failed").ThrowAsJavaScriptException(); return env.Null(); }
+
+      __weak DirectSyphonServer *wsrv = srv;
+      NSMutableArray<id<MTLCommandBuffer>> *flight = [NSMutableArray array];
+      auto buildFrame = [&](BOOL doWait) {
+        id<MTLCommandBuffer> c = [q commandBuffer];
+        MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+        rp.colorAttachments[0].texture = dst;
+        rp.colorAttachments[0].loadAction = MTLLoadActionLoad; // preserve unchanged tiles
+        rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+        id<MTLRenderCommandEncoder> enc = [c renderCommandEncoderWithDescriptor:rp];
+        [enc setRenderPipelineState:pso];
+        for (uint32_t k = 0; k < n; k++) {
+          NSUInteger cx = (k % cols) * tileW, cy = (k / cols) * tileH;
+          [enc setViewport:(MTLViewport){(double)cx,(double)cy,(double)tileW,(double)tileH,0,1}];
+          [enc setFragmentTexture:texs[k] atIndex:0];
+          [enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+        }
+        [enc endEncoding];
+        [c addCompletedHandler:^(id<MTLCommandBuffer> _Nonnull) { [wsrv publish]; }];
+        [c commit];
+        if (doWait) [c waitUntilCompleted];
+        else [flight addObject:c];
+      };
+      buildFrame(YES);
+      double t0 = NowMs();
+      for (uint32_t i = 0; i < iterations; i++) {
+        buildFrame(wait ? YES : NO);
+        if (!wait) {
+          while (flight.count > 0 &&
+                 (flight[0].status == MTLCommandBufferStatusCompleted ||
+                  flight[0].status == MTLCommandBufferStatusError))
+            [flight removeObjectAtIndex:0];
+        }
+      }
+      for (id<MTLCommandBuffer> c in flight) [c waitUntilCompleted];
+      total = NowMs() - t0;
+      [srv stop];
+      CFRelease(pub);
+      for (uint32_t k = 0; k < n; k++) if (surfs[k]) CFRelease(surfs[k]);
+    } else if (mode == "direct") {
       // ZERO-COPY composite: blit the N source tiles DIRECTLY into the server's
       // own published IOSurface (via SyphonSubclassing) and call -publish. Skips
       // SyphonMetalServer's internal copy of our atlas — one full blit instead of
@@ -1490,6 +1623,11 @@ static Napi::Value MakeTestSurface(const Napi::CallbackInfo &info) {
   const uint8_t r = info[2].As<Napi::Number>().Uint32Value();
   const uint8_t g = info[3].As<Napi::Number>().Uint32Value();
   const uint8_t b = info[4].As<Napi::Number>().Uint32Value();
+  // Optional bottom-half color (args 5,6,7) for verifying vertical flip.
+  const bool split = info.Length() >= 8;
+  const uint8_t br = split ? info[5].As<Napi::Number>().Uint32Value() : r;
+  const uint8_t bg = split ? info[6].As<Napi::Number>().Uint32Value() : g;
+  const uint8_t bb = split ? info[7].As<Napi::Number>().Uint32Value() : b;
   NSDictionary *props = @{
     (id)kIOSurfaceWidth : @(w),
     (id)kIOSurfaceHeight : @(h),
@@ -1506,10 +1644,12 @@ static Napi::Value MakeTestSurface(const Napi::CallbackInfo &info) {
   const size_t bpr = IOSurfaceGetBytesPerRow(s);
   for (NSUInteger y = 0; y < h; y++) {
     uint8_t *row = base + y * bpr;
+    const bool bottom = y >= h / 2; // row 0 = top in IOSurface memory order
+    const uint8_t rr = bottom ? br : r, gg = bottom ? bg : g, bbl = bottom ? bb : b;
     for (NSUInteger x = 0; x < w; x++) {
-      row[x * 4 + 0] = b;
-      row[x * 4 + 1] = g;
-      row[x * 4 + 2] = r;
+      row[x * 4 + 0] = bbl;
+      row[x * 4 + 1] = gg;
+      row[x * 4 + 2] = rr;
       row[x * 4 + 3] = 255;
     }
   }
