@@ -97,6 +97,10 @@ Combined with the atlas (vs one server per window, all repainting), a sparsely-u
 
 `CompositeSyphonOutput` also **coalesces** all paints that land in the same event-loop turn into a single atlas publish (on by default; set `coalesce = false` for an immediate publish per paint). Without it, N windows repainting in one tick would trigger N full-atlas publishes; with it, one. `npm run test:composite` drives 4 real offscreen windows through it end-to-end.
 
+When **every** cell is rewritten in a frame (a live video wall), the composite path automatically **double-buffers** the atlas: the next frame's blits target a second texture instead of waiting on the previous frame's Syphon copy (a write-after-read hazard). That overlap is worth another ~1.2–1.3× under full-update load (16-output: 0.66 → 0.54 ms). Partial frames keep the single persistent atlas, so unchanged tiles are never lost.
+
+If all your sources can live in **one** renderer, the fastest option is to render the grid in a single offscreen window (CSS layout) and publish it with `SyphonOutput` — Electron composites the cells for free and hands one IOSurface, skipping the per-tile blits entirely (the theoretical ceiling, ~2× over the atlas). Use `CompositeSyphonOutput` when sources need separate `webContents` (distinct origins, crash isolation); `npm run test:composite` exercises both.
+
 `examples/full-demo/` shows every capture method side by side with live controls.
 
 ## Low-level API

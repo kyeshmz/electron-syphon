@@ -29,6 +29,18 @@ function run() {
     }
     console.log('')
   }
+
+  // Ping-pong (double-buffered) atlas vs single buffer — ALL tiles change every
+  // frame (live video wall). Two buffers remove the write-after-read hazard so
+  // the next frame's blits overlap this frame's Syphon copy on the GPU.
+  console.log(`Ping-pong atlas — all tiles change/frame, single vs double buffer (async, flip)`)
+  console.log('outputs\tsingle\tdouble\tspeedup')
+  for (const [cols, rows] of [[3,3],[4,4],[5,5]]) {
+    const n = cols * rows
+    const r1 = addon.benchmarkScaling({ width: tileW, height: tileH, cols, rows, iterations: 500, mode: 'atlas', wait: false, flip: true, atlasBuffers: 1 })
+    const r2 = addon.benchmarkScaling({ width: tileW, height: tileH, cols, rows, iterations: 500, mode: 'atlas', wait: false, flip: true, atlasBuffers: 2 })
+    console.log(`${n}\t${r1.avgMs.toFixed(3)}\t${r2.avgMs.toFixed(3)}\t${(r1.avgMs / r2.avgMs).toFixed(2)}x`)
+  }
 }
 if (process.versions.electron) {
   const {app}=require('electron'); app.disableHardwareAcceleration()

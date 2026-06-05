@@ -109,9 +109,10 @@ private:
   // the measured 1.5-6x multi-output win (see benchmarkScaling). Source-surface
   // wrappers are cached by pointer here WITHOUT the single-size assumption of
   // surfaceTextures_, because atlas tiles can differ in size.
-  id<MTLTexture> atlas_ = nil;
+  id<MTLTexture> atlas_ = nil;    // active buffer — always holds the latest composite
+  id<MTLTexture> atlasAlt_ = nil; // alternate buffer for ping-pong full updates
   NSUInteger atlasW_ = 0, atlasH_ = 0;
-  BOOL atlasFilled_ = NO; // has the atlas been written at least once since alloc?
+  BOOL atlasFilled_ = NO; // has the active atlas been written at least once?
   NSMutableDictionary<NSNumber *, id<MTLTexture>> *atlasSrcTextures_ = nil;
 
   Napi::Value PublishAtlas(const Napi::CallbackInfo &info);
@@ -161,6 +162,7 @@ SyphonServer::~SyphonServer() {
   surfaceTextures_ = nil;
   atlasSrcTextures_ = nil;
   atlas_ = nil;
+  atlasAlt_ = nil;
   inflight_ = nil;
   queue_ = nil;
   device_ = nil;
@@ -177,6 +179,7 @@ void SyphonServer::Dispose(const Napi::CallbackInfo &info) {
     [surfaceTextures_ removeAllObjects];
     [atlasSrcTextures_ removeAllObjects];
     atlas_ = nil;
+    atlasAlt_ = nil;
     atlasW_ = atlasH_ = 0;
     atlasFilled_ = NO;
     cpuW_ = cpuH_ = surfW_ = surfH_ = 0;
@@ -313,6 +316,15 @@ Napi::Value SyphonServer::PublishAtlas(const Napi::CallbackInfo &info) {
   const NSUInteger aw = info[1].As<Napi::Number>().Uint32Value();
   const NSUInteger ah = info[2].As<Napi::Number>().Uint32Value();
   const BOOL flipped = info[3].As<Napi::Boolean>().Value() ? YES : NO;
+  // fullUpdate (optional): the caller guarantees these tiles cover the ENTIRE
+  // atlas, so the published frame is complete on its own. We then write a second
+  // buffer and ping-pong — removing the write-after-read hazard where the next
+  // frame's blits would otherwise wait for this frame's Syphon copy to finish.
+  // Only safe when every cell is rewritten; partial updates must keep the single
+  // persistent atlas (its unchanged tiles are the previous contents).
+  const BOOL fullUpdate = (info.Length() > 4 && info[4].IsBoolean())
+                              ? info[4].As<Napi::Boolean>().Value()
+                              : NO;
   const uint32_t count = tiles.Length();
   // count == 0 is allowed: it republishes the persisted atlas as-is (used to
   // feed a newly-connected client on a static wall).
@@ -329,11 +341,30 @@ Napi::Value SyphonServer::PublishAtlas(const Napi::CallbackInfo &info) {
       ad.usage = MTLTextureUsageShaderRead;
       ad.storageMode = MTLStorageModePrivate;
       atlas_ = [device_ newTextureWithDescriptor:ad];
+      atlasAlt_ = nil; // alternate buffer is stale at the new size; realloc lazily
       atlasW_ = aw;
       atlasH_ = ah;
       atlasFilled_ = NO; // fresh atlas has undefined contents until first blit
     }
     if (!atlas_) return Napi::Number::New(env, 0);
+
+    // Pick this frame's blit destination. Full updates target the alternate
+    // buffer (lazily allocated) so they never collide with the in-flight read of
+    // the active buffer; partial updates write the active buffer in place.
+    id<MTLTexture> dst = atlas_;
+    if (fullUpdate) {
+      if (!atlasAlt_) {
+        MTLTextureDescriptor *ad = [MTLTextureDescriptor
+            texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                         width:aw
+                                        height:ah
+                                     mipmapped:NO];
+        ad.usage = MTLTextureUsageShaderRead;
+        ad.storageMode = MTLStorageModePrivate;
+        atlasAlt_ = [device_ newTextureWithDescriptor:ad];
+      }
+      if (atlasAlt_) dst = atlasAlt_;
+    }
 
     id<MTLCommandBuffer> cmd = [queue_ commandBuffer];
     id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
@@ -369,28 +400,39 @@ Napi::Value SyphonServer::PublishAtlas(const Napi::CallbackInfo &info) {
                 sourceLevel:0
                sourceOrigin:MTLOriginMake(0, 0, 0)
                  sourceSize:MTLSizeMake(cw, ch, 1)
-                  toTexture:atlas_
+                  toTexture:dst
            destinationSlice:0
            destinationLevel:0
           destinationOrigin:MTLOriginMake(dx, dy, 0)];
       blitted++;
     }
     [blit endEncoding];
-    if (blitted > 0) atlasFilled_ = YES;
-    // With a persistent atlas, a dirty-only publish (or even 0 dirty tiles) is
-    // valid AS LONG AS the atlas already holds real pixels — unchanged tiles
-    // keep their last contents. Only bail if it was never filled (garbage).
-    if (!atlasFilled_) {
+
+    // Can we publish? A full update into the alternate buffer is a complete
+    // frame whenever it blitted anything; a write into the active buffer is
+    // valid once that buffer has ever been filled (partial/0-dirty republish).
+    const bool usingAlt = (dst == atlasAlt_);
+    if (!usingAlt && blitted > 0) atlasFilled_ = YES;
+    const bool canPublish = usingAlt ? (blitted > 0) : atlasFilled_;
+    if (!canPublish) {
       [cmd commit];
       return Napi::Number::New(env, 0);
     }
     NSRect region = NSMakeRect(0, 0, aw, ah);
-    [server_ publishFrameTexture:atlas_
+    [server_ publishFrameTexture:dst
                  onCommandBuffer:cmd
                      imageRegion:region
                          flipped:flipped];
     [cmd commit];
     [inflight_ addObject:cmd]; // released later by reap()/drain()
+
+    if (usingAlt) {
+      // The freshly published full frame becomes the active/latest; the old
+      // active becomes the alternate for the next full update (ping-pong).
+      atlasAlt_ = atlas_;
+      atlas_ = dst;
+      atlasFilled_ = YES;
+    }
   }
   return Napi::Number::New(env, 1);
 }
@@ -1015,7 +1057,19 @@ static Napi::Value BenchmarkScaling(const Napi::CallbackInfo &info) {
                                    : "private";
       ad.storageMode = atlasStore == "shared" ? MTLStorageModeShared
                                               : MTLStorageModePrivate;
-      id<MTLTexture> atlas = [dev newTextureWithDescriptor:ad];
+      // atlasBuffers: 1 = one persistent atlas (a write-after-read hazard makes
+      // next frame's blits wait for this frame's Syphon copy). 2 = ping-pong so
+      // frame N+1 writes a different atlas than frame N is being read from —
+      // removes the hazard, lets the GPU overlap. Only valid when every tile is
+      // rewritten each frame (full update); partial updates need the single
+      // persistent atlas.
+      const uint32_t nbuf =
+          opts.Has("atlasBuffers")
+              ? MAX(1u, MIN(2u, (uint32_t)opts.Get("atlasBuffers").ToNumber().Uint32Value()))
+              : 1;
+      id<MTLTexture> atlasA = [dev newTextureWithDescriptor:ad];
+      id<MTLTexture> atlasB = nbuf == 2 ? [dev newTextureWithDescriptor:ad] : nil;
+      id<MTLTexture> atlas = atlasA;
       id<MTLCommandQueue> q = [dev newCommandQueue];
       SyphonMetalServer *srv =
           [[SyphonMetalServer alloc] initWithName:@"scaling-atlas"
@@ -1032,6 +1086,7 @@ static Napi::Value BenchmarkScaling(const Napi::CallbackInfo &info) {
       NSMutableArray<id<MTLCommandBuffer>> *flight = [NSMutableArray array];
       uint32_t base = 0;
       auto buildFrame = [&](BOOL doWait, uint32_t nBlit) {
+        id<MTLTexture> target = atlas;
         id<MTLCommandBuffer> c = [q commandBuffer];
         id<MTLBlitCommandEncoder> blit = [c blitCommandEncoder];
         for (uint32_t j = 0; j < nBlit; j++) {
@@ -1041,18 +1096,20 @@ static Napi::Value BenchmarkScaling(const Napi::CallbackInfo &info) {
                     sourceSlice:0 sourceLevel:0
                    sourceOrigin:MTLOriginMake(0, 0, 0)
                      sourceSize:MTLSizeMake(tileW, tileH, 1)
-                      toTexture:atlas
+                      toTexture:target
                destinationSlice:0 destinationLevel:0
               destinationOrigin:MTLOriginMake(cx, cy, 0)];
         }
         base = (base + nBlit) % n;
         [blit endEncoding];
-        [srv publishFrameTexture:atlas onCommandBuffer:c imageRegion:region flipped:flipped];
+        [srv publishFrameTexture:target onCommandBuffer:c imageRegion:region flipped:flipped];
         [c commit];
         if (doWait) [c waitUntilCompleted];
         else [flight addObject:c];
+        if (atlasB) atlas = (target == atlasA) ? atlasB : atlasA; // ping-pong
       };
       buildFrame(YES, n); // warm up: fill the whole atlas once
+      if (atlasB) buildFrame(YES, n); // fill the second buffer too
       double t0 = NowMs();
       for (uint32_t i = 0; i < iterations; i++) {
         buildFrame(wait ? YES : NO, dirty);

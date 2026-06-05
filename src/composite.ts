@@ -237,7 +237,16 @@ export class CompositeSyphonOutput {
     }
     if (tiles.length === 0) return // nothing changed → atlas already shows it
 
-    const enqueued = this.server.publishAtlas(tiles, this.atlasWidth, this.atlasHeight, this.flipY)
+    // Every grid cell rewritten this frame → safe to ping-pong the atlas (no
+    // write-after-read stall against the previous frame's Syphon copy).
+    const fullUpdate = tiles.length === this.cols * this.rows
+    const enqueued = this.server.publishAtlas(
+      tiles,
+      this.atlasWidth,
+      this.atlasHeight,
+      this.flipY,
+      fullUpdate
+    )
     if (enqueued) {
       this.pending.push(batch)
       this.frames++

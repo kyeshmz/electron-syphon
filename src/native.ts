@@ -17,7 +17,12 @@ export interface NativeSyphonServer {
     tiles: { handle: Buffer; x: number; y: number; w: number; h: number }[],
     atlasWidth: number,
     atlasHeight: number,
-    flipY: boolean
+    flipY: boolean,
+    /** The tiles cover the ENTIRE atlas (every cell rewritten). Enables a
+     *  double-buffered ping-pong that removes the write-after-read hazard with
+     *  the previous frame's Syphon copy (~1.2–1.3× under full-update load). Must
+     *  be false for partial updates. */
+    fullUpdate?: boolean
   ): number
   /** How many async frames finished on the GPU since last call (drops them). */
   reap(): number
