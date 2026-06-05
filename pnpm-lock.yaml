@@ -9,32 +9,32 @@ importers:
   .:
     dependencies:
       node-addon-api:
-        specifier: ^8.3.1
+        specifier: ^8.8.0
         version: 8.8.0
       node-gyp-build:
         specifier: ^4.8.4
         version: 4.8.4
     devDependencies:
       '@types/node':
-        specifier: ^22.14.1
+        specifier: ^22.19.19
         version: 22.19.19
       commit-and-tag-version:
         specifier: ^12.7.3
         version: 12.7.3
       electron:
-        specifier: ^42.3.2
-        version: 42.3.2
+        specifier: ^42.3.3
+        version: 42.3.3
       electron-rebuild:
         specifier: ^3.2.9
         version: 3.2.9
       node-gyp:
-        specifier: ^11.2.0
+        specifier: ^11.5.0
         version: 11.5.0
       prebuildify:
         specifier: ^6.0.1
         version: 6.0.1
       typescript:
-        specifier: ^5.8.3
+        specifier: ^5.9.3
         version: 5.9.3
 
 packages:
@@ -121,8 +121,8 @@ packages:
   '@types/node@22.19.19':
     resolution: {integrity: sha512-dyh/xO2Fh5bYrfWaaqGrRQQGkNdmYw6AmaAUvYeUMNTWQtvb796ikLdmTchRmOlOiIJ1TDXfWgVx1QkUlQ6Hew==}
 
-  '@types/node@24.12.4':
-    resolution: {integrity: sha512-GUUEShf+PBCGW2KaXwcIt3Yk+e3pkKwWKb9GSyM9WQVE+ep2jzmHdGsHzu4wgcZy5fN9FBdVzjpBQsYlpfpgLA==}
+  '@types/node@24.13.0':
+    resolution: {integrity: sha512-5vtOqGQr4NJKeEzV441FcOi2MeG9UTWq9LqVLGneDdu4vlX17H8kQ2PA2UmNwCUGPVDj4oBjNhS7ReVEIWJJrg==}
 
   '@types/normalize-package-data@2.4.4':
     resolution: {integrity: sha512-37i+OaWTh9qeK4LSHPsyRC7NahnGotNuZvjLSgcPzblpHB3rrCJxAOgI5gCdKm7coonsaX1Of0ILiTcnZjbfxA==}
@@ -470,10 +470,9 @@ packages:
     deprecated: Please use @electron/rebuild moving forward.  There is no API change, just a package name change
     hasBin: true
 
-  electron@42.3.2:
-    resolution: {integrity: sha512-R8qL6TMQ+u5r/l1mL6zWqqK3eQo6Bqi4ScmysgODcy+SNR76HQhvbZUEL/9GqNuF0fNFJxphz/bh/TC4jW8NbA==}
+  electron@42.3.3:
+    resolution: {integrity: sha512-0MwYp9wTb7TrtTalOYqeW+suqd9T/Znstr/nDLKqFGIjHdBZX339guo3mQqTPURRZ/UQmYM4uMpzKpI5wLptfQ==}
     engines: {node: '>= 22.12.0'}
-    deprecated: This version of Electron has a critical bug in Buffer handling, please upgrade to 42.3.3
     hasBin: true
 
   emoji-regex@8.0.0:
@@ -1450,11 +1449,11 @@ packages:
   undici-types@6.21.0:
     resolution: {integrity: sha512-iwDZqg0QAGrg9Rav5H4n0M64c3mkR59cJ6wQp+7C4nI0gsmExaedaYLNO44eT4AtBBwjbTiGPMlt2Md0T9H9JQ==}
 
-  undici-types@7.16.0:
-    resolution: {integrity: sha512-Zz+aZWSj8LE6zoxD+xrjh4VfkIG8Ya6LvYkZqtUQGJPZjYl53ypCaUwWqo7eI0x66KBGeRo+mlBEkMSeSZ38Nw==}
+  undici-types@7.18.2:
+    resolution: {integrity: sha512-AsuCzffGHJybSaRrmr5eHr81mwJU3kjw6M+uprWvCXiNeN9SOGwQ3Jn8jb8m3Z6izVgknn1R0FTCEAP2QrLY/w==}
 
-  undici@7.27.0:
-    resolution: {integrity: sha512-+t2Z/GwkZQDtu00813aP66ygViGtPHKhhoFZpQKpKrE+9jIgES+Zw+mFNaDWOVRKiuJjuqKHzD3B1sfGg8+ZOQ==}
+  undici@7.27.1:
+    resolution: {integrity: sha512-UDdpiex+mzigiyrXrGbiUaF4HzTNhKbh2vRNFaTMzcqmLIPrZxaCtwo/1TMSuWoM1Xz3WiTo9KdgI3kRqYzJGg==}
     engines: {node: '>=20.18.1'}
 
   unique-filename@2.0.1:
@@ -1579,7 +1578,7 @@ snapshots:
       semver: 7.8.1
       sumchecker: 3.0.1
     optionalDependencies:
-      undici: 7.27.0
+      undici: 7.27.1
     transitivePeerDependencies:
       - supports-color
 
@@ -1660,9 +1659,9 @@ snapshots:
     dependencies:
       undici-types: 6.21.0
 
-  '@types/node@24.12.4':
+  '@types/node@24.13.0':
     dependencies:
-      undici-types: 7.16.0
+      undici-types: 7.18.2
 
   '@types/normalize-package-data@2.4.4': {}
 
@@ -2065,10 +2064,10 @@ snapshots:
       - bluebird
       - supports-color
 
-  electron@42.3.2:
+  electron@42.3.3:
     dependencies:
       '@electron/get': 5.0.0
-      '@types/node': 24.12.4
+      '@types/node': 24.13.0
       extract-zip: 2.0.1
     transitivePeerDependencies:
       - supports-color
@@ -3099,9 +3098,9 @@ snapshots:
 
   undici-types@6.21.0: {}
 
-  undici-types@7.16.0: {}
+  undici-types@7.18.2: {}
 
-  undici@7.27.0:
+  undici@7.27.1:
     optional: true
 
   unique-filename@2.0.1:

@@ -63,7 +63,7 @@
     "release:push": "git push --follow-tags origin main"
   },
   "dependencies": {
-    "node-addon-api": "^8.3.1",
+    "node-addon-api": "^8.8.0",
     "node-gyp-build": "^4.8.4"
   },
   "peerDependencies": {
@@ -75,13 +75,13 @@
     }
   },
   "devDependencies": {
-    "@types/node": "^22.14.1",
+    "@types/node": "^22.19.19",
     "commit-and-tag-version": "^12.7.3",
-    "electron": "^42.3.2",
+    "electron": "^42.3.3",
     "electron-rebuild": "^3.2.9",
-    "node-gyp": "^11.2.0",
+    "node-gyp": "^11.5.0",
     "prebuildify": "^6.0.1",
-    "typescript": "^5.8.3"
+    "typescript": "^5.9.3"
   },
   "keywords": [
     "syphon",
