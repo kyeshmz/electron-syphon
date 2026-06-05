@@ -49,6 +49,7 @@ macOS 11+. Electron is an optional peer dep; **33+** for the zero-copy path (old
 Publish is ~0.06 ms/frame at 1080p; what you pay scales with **pixels** and **orientation**.
 
 - **Resolution** — render size *is* send size (we publish exactly what's rendered). Set via `attach(wc, { width, height })` or `setResolution(w, h)`, and create the window with **`deviceScaleFactor: 1`** (Electron 42+) or Retina renders 2× (4× the work). Render at the size your consumer needs, not the display's.
+- **Publish rate** — `maxPublishRate` (fps, default 0 = every paint) caps how often frames reach Syphon *without* slowing the renderer. Syphon is fire-and-forget, so if your window paints at 60 but the consumer only pulls 30, half the publishes are wasted. Unlike `webContents.setFrameRate(30)` (which also halves the page's rAF), this keeps the renderer at full rate and just forwards every Nth frame — verified accurate to the target (`npm run bench:load` covers the composite case).
 - **Orientation** — `flipY` defaults to `true` (Electron top-left → most clients want bottom-left). `flipY = false` takes Syphon's pure-blit path (~33% faster) if you pre-flip your content:
 
 ```

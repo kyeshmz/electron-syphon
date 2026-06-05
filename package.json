@@ -49,6 +49,7 @@
     "test:atlas": "electron test/atlas-check.js && electron test/atlas-partial-check.js && electron test/atlas-pingpong-check.js",
     "test:composite": "npm run build:ts && electron test/composite-e2e.js && electron test/single-window-grid.js",
     "bench:load": "npm run build:ts && electron test/composite-load.js",
+    "test:rate": "npm run build:ts && electron test/output-rate-load.js",
     "test:e2e": "npm --prefix examples/full-demo test",
     "make-library": "bash scripts/build-library.sh",
     "prepack": "npm run build:ts",

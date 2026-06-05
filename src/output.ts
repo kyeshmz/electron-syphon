@@ -26,10 +26,20 @@ export class SyphonOutput {
   async = true
   /** Skip all GPU work when no Syphon client is attached (idle win). */
   skipWhenNoClients = true
+  /**
+   * Cap the publish rate (frames/sec), independent of how fast the window
+   * renders. Each publish is a GPU copy into Syphon's surface, but Syphon is
+   * fire-and-forget — any frame the consumer never samples is wasted work. Unlike
+   * `webContents.setFrameRate()`, this does NOT slow the renderer: the page keeps
+   * painting (and its rAF loop keeps running) at full rate for smooth animation,
+   * while only every Nth frame is published. Set to your consumer's rate (e.g.
+   * 30) to skip the in-between paints. 0 = uncapped (publish every paint). */
+  maxPublishRate = 0
 
   /** Stats. */
   frames = 0
   lastFrameAt = 0
+  private lastPublishAt = 0
   /** Exponential moving average of the native publish call (ms). */
   publishMsEMA = 0
   /** Actual published frame size (= codedSize; reveals Retina/DSF scaling). */
@@ -203,6 +213,27 @@ export class SyphonOutput {
     return this.pending.length
   }
 
+  // Returns true if enough time has elapsed to publish at maxPublishRate (and
+  // records the moment); false to drop this frame. Always true when uncapped.
+  // The dropped frame's texture is released by the caller — the renderer keeps
+  // painting at full rate, we just don't forward every frame to Syphon.
+  private rateGate(): boolean {
+    if (this.maxPublishRate <= 0) return true
+    const interval = 1000 / this.maxPublishRate
+    const now = Date.now()
+    if (this.lastPublishAt === 0) {
+      this.lastPublishAt = now
+      return true
+    }
+    if (now - this.lastPublishAt < interval) return false
+    // Advance the target by exactly one interval (not to `now`) so jitter in
+    // paint arrival doesn't compound into a slower-than-target rate. If we've
+    // fallen more than an interval behind (a stall), resync to avoid a burst.
+    this.lastPublishAt += interval
+    if (now - this.lastPublishAt > interval) this.lastPublishAt = now
+    return true
+  }
+
   private handlePaint = (
     event: Electron.Event<Electron.WebContentsPaintEventParams>,
     _dirty: Rectangle,
@@ -212,7 +243,7 @@ export class SyphonOutput {
 
     // Fallback: no shared texture → CPU bitmap (BGRA). Still main-process, no IPC.
     if (!texture) {
-      if (this.enabled && (!this.skipWhenNoClients || this.server.hasClients)) {
+      if (this.enabled && (!this.skipWhenNoClients || this.server.hasClients) && this.rateGate()) {
         this.usingSharedTexture = false
         const { width, height } = image.getSize()
         if (width > 0 && height > 0) {
@@ -240,7 +271,10 @@ export class SyphonOutput {
 
     const skip =
       !this.enabled || !isFrame || !handle || (this.skipWhenNoClients && !this.server.hasClients)
-    if (skip) {
+    // Rate gate after the other skips so a dropped-for-rate frame doesn't reset
+    // timing against frames we skipped for being idle/disabled. Short-circuits so
+    // rateGate() only ticks when we'd otherwise publish.
+    if (skip || !this.rateGate()) {
       texture.release()
       return
     }
