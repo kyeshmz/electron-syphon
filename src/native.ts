@@ -135,7 +135,7 @@ export interface NativeDirectServer {
 interface NativeAddon {
   SyphonServer: new (name: string) => NativeSyphonServer
   SyphonClient: new (serverName: string) => NativeSyphonClient
-  DirectServer: new (name: string) => NativeDirectServer
+  DirectServer: new (name: string, outputScale?: number) => NativeDirectServer
   listServers(): SyphonServerInfo[]
 }
 

@@ -42,6 +42,15 @@ export interface CompositeOptions {
    * whole-surface flip. Publishes one persistent surface (same tear-under-load
    * profile as any Syphon server). Default false. */
   direct?: boolean
+  /**
+   * Publish the whole composite at this fraction of its native resolution
+   * (0 < scale ≤ 1; default 1). The `direct` render pass downscales each tile as
+   * it composites — nearly free, since it's already a sampling pass — shrinking
+   * the published surface, its write bandwidth, and what the consumer reads. For
+   * a wall shown smaller than `cols·tileWidth × rows·tileHeight` this is a large
+   * win (≈ scale² less work: 0.5 → ~4×, 0.25 → ~8×). Requires `direct: true`
+   * (the atlas backend has no scaling pass); ignored otherwise. */
+  outputScale?: number
 }
 
 // The atlas blit COPIES each source into a PERSISTENT atlas texture, so once a
@@ -125,9 +134,17 @@ export class CompositeSyphonOutput {
   // pipeline shallow so we never starve a source.
   private readonly maxInFlight = 6
 
+  /** The fraction of native resolution actually published (1 unless downscaled
+   *  via `outputScale` on the direct backend). */
+  readonly outputScale: number
+
   constructor(name: string, opts: CompositeOptions = {}) {
     this.direct = opts.direct ?? false
-    this.server = this.direct ? new DirectServer(name) : new SyphonServer(name)
+    // outputScale only applies to the direct backend (it needs the render pass).
+    this.outputScale = this.direct ? Math.min(1, Math.max(0.01, opts.outputScale ?? 1)) : 1
+    this.server = this.direct
+      ? new DirectServer(name, this.outputScale)
+      : new SyphonServer(name)
     this.cols = Math.max(1, Math.floor(opts.cols ?? 2))
     this.rows = Math.max(1, Math.floor(opts.rows ?? 2))
     this.tileWidth = Math.max(1, Math.floor(opts.tileWidth ?? 1280))

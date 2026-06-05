@@ -955,7 +955,8 @@ private:
   DirectSyphonServer *server_ = nil;
   IOSurfaceRef pub_ = nullptr;     // the server's published surface
   id<MTLTexture> pubTex_ = nil;    // pub_ wrapped as a render target
-  NSUInteger pubW_ = 0, pubH_ = 0;
+  NSUInteger pubW_ = 0, pubH_ = 0; // published surface size (= native * scale_)
+  double scale_ = 1.0;             // publish at this fraction of native size
   NSMutableDictionary<NSNumber *, id<MTLTexture>> *srcTex_ = nil;
   NSMutableArray<id<MTLCommandBuffer>> *inflight_ = nil;
 };
@@ -964,6 +965,10 @@ DirectServer::DirectServer(const Napi::CallbackInfo &info)
     : Napi::ObjectWrap<DirectServer>(info) {
   Napi::Env env = info.Env();
   std::string name = info[0].As<Napi::String>().Utf8Value();
+  if (info.Length() > 1 && info[1].IsNumber()) {
+    double s = info[1].As<Napi::Number>().DoubleValue();
+    if (s > 0 && s <= 1) scale_ = s;
+  }
   @autoreleasepool {
     device_ = MTLCreateSystemDefaultDevice();
     queue_ = [device_ newCommandQueue];
@@ -1036,7 +1041,7 @@ bool DirectServer::EnsurePipeline() {
       @"  float2 flp[4]  = { float2(0,0), float2(1,0), float2(0,1), float2(1,1) };\n"
       @"  VOut o; o.pos = float4(p[vid],0,1); o.uv = flip ? flp[vid] : pass[vid]; return o; }\n"
       @"fragment float4 fmain(VOut in [[stage_in]], texture2d<float> t [[texture(0)]]) {\n"
-      @"  constexpr sampler s(filter::nearest); return t.sample(s, in.uv); }\n";
+      @"  constexpr sampler s(filter::linear); return t.sample(s, in.uv); }\n"; // linear: clean downscale
   id<MTLLibrary> lib = [device_ newLibraryWithSource:msl options:nil error:&err];
   if (!lib) return false;
   MTLRenderPipelineDescriptor *pd = [[MTLRenderPipelineDescriptor alloc] init];
@@ -1065,18 +1070,24 @@ Napi::Value DirectServer::PublishAtlas(const Napi::CallbackInfo &info) {
   if (w == 0 || h == 0) return Napi::Number::New(env, 0);
   if (!EnsurePipeline()) return Napi::Number::New(env, 0);
 
+  // Published surface is the native composite size scaled by scale_ (downscaling
+  // the whole wall during the composite render — free since it's already a
+  // sampling pass — for consumers that display it smaller than native).
+  const NSUInteger ow = MAX((NSUInteger)1, (NSUInteger)llround(w * scale_));
+  const NSUInteger oh = MAX((NSUInteger)1, (NSUInteger)llround(h * scale_));
+
   @autoreleasepool {
-    if (!pub_ || pubW_ != w || pubH_ != h) {
+    if (!pub_ || pubW_ != ow || pubH_ != oh) {
       if (pub_) CFRelease(pub_);
-      pub_ = [server_ newSurfaceForWidth:w height:h options:nil]; // returns +1
+      pub_ = [server_ newSurfaceForWidth:ow height:oh options:nil]; // returns +1
       if (!pub_) return Napi::Number::New(env, 0);
       MTLTextureDescriptor *rd = [MTLTextureDescriptor
           texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
-                                       width:w height:h mipmapped:NO];
+                                       width:ow height:oh mipmapped:NO];
       rd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
       rd.storageMode = MTLStorageModeShared;
       pubTex_ = [device_ newTextureWithDescriptor:rd iosurface:pub_ plane:0];
-      pubW_ = w; pubH_ = h;
+      pubW_ = ow; pubH_ = oh;
     }
     if (!pubTex_) return Napi::Number::New(env, 0);
 
@@ -1112,8 +1123,9 @@ Napi::Value DirectServer::PublishAtlas(const Napi::CallbackInfo &info) {
       cw = MIN(cw, w - dx);
       ch = MIN(ch, h - dy);
       if (cw == 0 || ch == 0) continue;
-      [enc setViewport:(MTLViewport){(double)dx, (double)dy, (double)cw,
-                                     (double)ch, 0.0, 1.0}];
+      // Tile rect scaled into the (possibly downscaled) published surface.
+      [enc setViewport:(MTLViewport){dx * scale_, dy * scale_, cw * scale_,
+                                     ch * scale_, 0.0, 1.0}];
       [enc setFragmentTexture:src atIndex:0];
       [enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
       drawn++;
@@ -1281,15 +1293,23 @@ static Napi::Value BenchmarkScaling(const Napi::CallbackInfo &info) {
         surfs[k] = MakeFilledSurface(tileW, tileH);
         texs[k] = WrapSurface(dev, surfs[k], tileW, tileH);
       }
+      // outputScale: publish the whole composite at a fraction of native size.
+      // The render pass already samples each source, so downscaling into a
+      // smaller surface is nearly free and shrinks the write + the surface a
+      // consumer reads — for walls displayed smaller than their native res.
+      double oscale = opts.Has("outputScale") ? opts.Get("outputScale").ToNumber().DoubleValue() : 1.0;
+      if (oscale <= 0 || oscale > 1) oscale = 1.0;
+      const NSUInteger ow = MAX((NSUInteger)1, (NSUInteger)llround(aw * oscale));
+      const NSUInteger oh = MAX((NSUInteger)1, (NSUInteger)llround(ah * oscale));
       id<MTLCommandQueue> q = [dev newCommandQueue];
       DirectSyphonServer *srv =
           [[DirectSyphonServer alloc] initWithName:@"scaling-directflip" options:nil];
-      IOSurfaceRef pub = [srv newSurfaceForWidth:aw height:ah options:nil];
+      IOSurfaceRef pub = [srv newSurfaceForWidth:ow height:oh options:nil];
       if (!pub) { Napi::Error::New(env, "newSurfaceForWidth failed").ThrowAsJavaScriptException(); return env.Null(); }
       // Render target view of the server surface (BGRA8 color attachment).
       MTLTextureDescriptor *rd = [MTLTextureDescriptor
           texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
-                                       width:aw height:ah mipmapped:NO];
+                                       width:ow height:oh mipmapped:NO];
       rd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
       rd.storageMode = MTLStorageModeShared;
       id<MTLTexture> dst = [dev newTextureWithDescriptor:rd iosurface:pub plane:0];
@@ -1338,8 +1358,8 @@ static Napi::Value BenchmarkScaling(const Napi::CallbackInfo &info) {
         [enc setRenderPipelineState:pso];
         for (uint32_t j = 0; j < nDraw; j++) {
           uint32_t k = (base + j) % n;
-          NSUInteger cx = (k % cols) * tileW, cy = (k / cols) * tileH;
-          [enc setViewport:(MTLViewport){(double)cx,(double)cy,(double)tileW,(double)tileH,0,1}];
+          double cx = (k % cols) * tileW * oscale, cy = (k / cols) * tileH * oscale;
+          [enc setViewport:(MTLViewport){cx, cy, tileW * oscale, tileH * oscale, 0, 1}];
           [enc setFragmentTexture:texs[k] atIndex:0];
           [enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
         }

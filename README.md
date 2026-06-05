@@ -108,6 +108,12 @@ When **every** cell is rewritten in a frame (a live video wall), the composite p
 
 Partial updates are where `direct` pulls furthest ahead: it has no separate full-atlas Syphon copy, so redrawing only the changed tiles touches only their pixels (the rest of the surface is untouched on Apple's tile GPU). Measured at 25 outputs — 1 tile changing per frame: **0.06 ms vs 0.62 ms all-changing (10×)**, where the atlas backend's partial only reaches ~2.5× (its Syphon copy runs full-size every frame). So a large wall where few windows move at a time runs many times faster on `direct`.
 
+**Downscale the whole wall with `outputScale`** (direct backend, `0 < scale ≤ 1`). The composite render is already a sampling pass, so publishing at a fraction of native resolution is nearly free and the fragment shader runs per *output* pixel — work drops ≈ `scale²`. Measured for a 25-tile (6400×3600) wall: `outputScale: 0.5` → 3200×1800, **~3–5× faster**; `0.25` → 1600×900, **~8× faster** — and the consumer reads 4–16× less data. Use it when the wall is displayed smaller than `cols·tileWidth × rows·tileHeight` (monitoring/preview); sources still render at full resolution, so it's a publish-time downscale, not a source-quality one:
+
+```ts
+new CompositeSyphonOutput('Wall', { direct: true, cols: 5, rows: 5, outputScale: 0.5 })
+```
+
 If all your sources can live in **one** renderer, the fastest option is to render the grid in a single offscreen window (CSS layout) and publish it with `SyphonOutput` — Electron composites the cells for free and hands one IOSurface, skipping the per-tile blits entirely (the theoretical ceiling, ~2× over the atlas). Use `CompositeSyphonOutput` when sources need separate `webContents` (distinct origins, crash isolation); `npm run test:composite` exercises both.
 
 `examples/full-demo/` shows every capture method side by side with live controls.
